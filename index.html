@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EmbeddingFlow — Transform embedding process</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="header">
+    <h1 class="title">EmbeddingFlow</h1>
+    <p class="subtitle">Transform embedding process — from text to vectors</p>
+  </header>
+
+  <main class="split-screen">
+    <!-- Left: Pipeline & controls -->
+    <section class="panel pipeline-panel">
+      <h2 class="panel-title">Pipeline</h2>
+      <div class="input-group">
+        <label for="text-input">Input text</label>
+        <textarea id="text-input" rows="3" placeholder="Type a sentence…">The quick brown fox</textarea>
+      </div>
+      <div class="steps">
+        <div class="step" data-step="1">
+          <span class="step-num">1</span>
+          <span class="step-label">Tokenize</span>
+          <div class="step-output" id="tokens-out">—</div>
+        </div>
+        <div class="step" data-step="2">
+          <span class="step-num">2</span>
+          <span class="step-label">Token IDs</span>
+          <div class="step-output" id="ids-out">—</div>
+        </div>
+        <div class="step" data-step="3">
+          <span class="step-num">3</span>
+          <span class="step-label">Embedding matrix</span>
+          <div class="step-output step-meta" id="matrix-meta">—</div>
+        </div>
+      </div>
+      <button type="button" class="btn-run" id="btn-run">Run pipeline</button>
+    </section>
+
+    <!-- Right: Matrix visual -->
+    <section class="panel matrix-panel">
+      <h2 class="panel-title">Matrix view</h2>
+      <div class="matrix-legend">
+        <span>Rows = tokens</span>
+        <span>Cols = dimensions</span>
+      </div>
+      <div class="matrix-container" id="matrix-container">
+        <div class="matrix-placeholder" id="matrix-placeholder">
+          Enter text and run the pipeline to see the embedding matrix.
+        </div>
+        <div class="matrix-grid" id="matrix-grid" aria-hidden="true"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,1 +1,1 @@
-# Pipeline phases
+"""Pipeline phases."""

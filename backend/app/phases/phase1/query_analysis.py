@@ -1,145 +1,123 @@
 """
-Task 1.1: Query Analysis
-- Intent classification
-- Entity extraction
-- Detect if time-sensitive
-- Complexity assessment
+Phase 1, Task 1.1: Query Analysis.
+
+- Intent classification (purpose of query)
+- Entity extraction (important words/concepts)
+- Time-sensitivity detection (time or recency)
+- Complexity assessment (how difficult the query is)
 """
-from app.config import Settings
-from app.phases.phase1.schemas import (
-    QueryAnalysisResult,
-    IntentCategory,
-    ComplexityLevel,
-    ExtractedEntity,
-)
-from openai import OpenAI
+
 import json
+import os
+from typing import Any
+
+from openai import OpenAI
+
+from .schemas import (
+    ComplexityOutput,
+    EntityOutput,
+    IntentOutput,
+    QueryAnalysisOutput,
+    QueryAnalysisResponse,
+)
+
+QUERY_ANALYSIS_SYSTEM = """You are a query analyst. Analyze the user's search query and return a JSON object with:
+
+1. intent: purpose of the query
+   - primary: one of factual, comparison, how_to, opinion, news, numerical, other
+   - categories: list of all applicable intents from the same set
+
+2. entities: important words or concepts (names, products, events, places, dates, topics)
+   - Each: { "text": "...", "type": "person"|"organization"|"product"|"event"|"place"|"date"|"topic"|"other" }
+
+3. time_sensitive: true if the query asks about recent events, specific dates, or recency
+
+4. time_expressions: list of explicit time phrases in the query if time_sensitive (e.g. "2024", "last quarter", "recent"); empty list if not time_sensitive
+
+5. complexity:
+   - level: "simple" (single fact), "moderate" (multiple aspects), "complex" (multi-part or multi-hop)
+   - suggested_sub_questions: 0 for simple, 1-3 for moderate, 2-5 for complex
+   - multi_hop: true if the query likely needs connecting multiple sources or steps (e.g. "What did the CEO of X say about Y?")
+
+Return only valid JSON with keys: intent, entities, time_sensitive, time_expressions, complexity. No markdown or explanation."""
+
+QUERY_ANALYSIS_USER_TEMPLATE = "Analyze this search query:\n\n{query}"
 
 
-QUERY_ANALYSIS_SYSTEM = """You are a query analysis system for a RAG pipeline. Analyze the user's search query and return structured JSON.
-
-Output JSON with exactly these fields:
-- intent: one of factual, comparison, how_to, opinion_or_analysis, recent_events, definition, multi_hop, other
-- intent_confidence: float 0-1
-- entities: list of { "text": "...", "type": "PERSON|ORG|PRODUCT|EVENT|DATE|LOCATION|OTHER", "relevance": "high|medium|low" }
-- time_sensitive: boolean - true if the query asks for recent/latest/current/breaking/today/news or time-bound info
-- time_sensitivity_reason: one short sentence
-- complexity: one of simple, moderate, complex (simple=single fact, moderate=few entities or one comparison, complex=multi-hop or many sources)
-- complexity_reason: one short sentence
-
-Be concise. Extract only entities that appear in the query and are relevant to answering it."""
+def _get_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is required for query analysis")
+    return OpenAI(api_key=api_key)
 
 
-def _parse_llm_response(raw: str) -> dict:
-    """Extract JSON from LLM response, handling markdown code blocks."""
-    text = raw.strip()
-    # Remove optional markdown code block
-    if "```json" in text:
-        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in text:
-        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+def _parse_llm_response(content: str) -> dict[str, Any]:
+    """Parse JSON from LLM response, stripping markdown code blocks if present."""
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
     return json.loads(text)
 
 
-def _normalize_enum(value: str, enum_class) -> str:
-    """Map LLM string to enum value; default to first enum if invalid."""
-    v = value.strip().lower().replace(" ", "_")
-    for e in enum_class:
-        if e.value == v or e.name.lower() == v:
-            return e.value
-    return list(enum_class)[0].value
-
-
-def analyze_query(query: str, settings: Settings | None = None) -> QueryAnalysisResult:
+def analyze_query(query: str) -> QueryAnalysisResponse:
     """
-    Run Task 1.1: Query Analysis.
-    Returns intent, entities, time_sensitivity, and complexity.
-    """
-    settings = settings or Settings()
-    if not settings.openai_api_key:
-        # Fallback: rule-based stub for testing without API key
-        return _analyze_query_fallback(query)
+    Run Task 1.1 Query Analysis on the given query string.
 
-    client = OpenAI(api_key=settings.openai_api_key)
-    resp = client.chat.completions.create(
-        model=settings.model_query_analysis,
+    Returns structured JSON-ready result for Phase 1.2/1.3 and Phase 2.
+    """
+    if not query or not query.strip():
+        return QueryAnalysisResponse(
+            query_analysis=QueryAnalysisOutput(
+                intent=IntentOutput(primary="other", categories=[]),
+                entities=[],
+                time_sensitive=False,
+                time_expressions=[],
+                complexity=ComplexityOutput(level="simple", suggested_sub_questions=0, multi_hop=False),
+            )
+        )
+
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=os.environ.get("OPENAI_QUERY_ANALYSIS_MODEL", "gpt-4o-mini"),
         messages=[
             {"role": "system", "content": QUERY_ANALYSIS_SYSTEM},
-            {"role": "user", "content": f"Analyze this query:\n{query}"},
+            {"role": "user", "content": QUERY_ANALYSIS_USER_TEMPLATE.format(query=query.strip())},
         ],
         temperature=0.1,
     )
-    raw = resp.choices[0].message.content or "{}"
-    data = _parse_llm_response(raw)
+    content = response.choices[0].message.content
+    raw = _parse_llm_response(content)
 
-    # Map to our enums and types
-    intent = _normalize_enum(
-        data.get("intent", "other"),
-        IntentCategory,
+    # Map raw dict to Pydantic models
+    intent_raw = raw.get("intent") or {}
+    intent = IntentOutput(
+        primary=intent_raw.get("primary", "other"),
+        categories=intent_raw.get("categories", []),
     )
-    complexity = _normalize_enum(
-        data.get("complexity", "simple"),
-        ComplexityLevel,
-    )
-    entities = []
-    for e in data.get("entities") or []:
-        if isinstance(e, dict) and e.get("text"):
-            entities.append(
-                ExtractedEntity(
-                    text=str(e["text"]),
-                    type=str(e.get("type", "OTHER")).upper(),
-                    relevance=str(e.get("relevance", "high")).lower(),
-                )
-            )
-
-    return QueryAnalysisResult(
-        intent=IntentCategory(intent),
-        intent_confidence=float(data.get("intent_confidence", 1.0)),
-        entities=entities,
-        time_sensitive=bool(data.get("time_sensitive", False)),
-        time_sensitivity_reason=data.get("time_sensitivity_reason") or None,
-        complexity=ComplexityLevel(complexity),
-        complexity_reason=data.get("complexity_reason") or None,
+    entities = [
+        EntityOutput(text=e["text"], type=e.get("type", "other"))
+        for e in raw.get("entities", [])
+    ]
+    time_sensitive = raw.get("time_sensitive", False)
+    time_expressions = raw.get("time_expressions", []) if time_sensitive else []
+    comp = raw.get("complexity") or {}
+    complexity = ComplexityOutput(
+        level=comp.get("level", "simple"),
+        suggested_sub_questions=comp.get("suggested_sub_questions", 0),
+        multi_hop=comp.get("multi_hop", False),
     )
 
-
-def _analyze_query_fallback(query: str) -> QueryAnalysisResult:
-    """Rule-based fallback when no OpenAI API key is set."""
-    q = query.lower()
-    # Time-sensitive heuristics
-    time_keywords = (
-        "latest", "recent", "current", "today", "this week", "this month",
-        "breaking", "news", "2024", "2025", "last year", "last month",
+    return QueryAnalysisResponse(
+        query_analysis=QueryAnalysisOutput(
+            intent=intent,
+            entities=entities,
+            time_sensitive=time_sensitive,
+            time_expressions=time_expressions,
+            complexity=complexity,
+        )
     )
-    time_sensitive = any(k in q for k in time_keywords)
-    # Simple complexity heuristics
-    word_count = len(query.split())
-    if word_count <= 5 and " vs " not in q and " and " not in q:
-        complexity = ComplexityLevel.SIMPLE
-        complexity_reason = "Short, single-focus query"
-    elif word_count <= 12 and (" vs " in q or " compare " in q or " and " in q):
-        complexity = ComplexityLevel.MODERATE
-        complexity_reason = "Comparison or multiple concepts"
-    else:
-        complexity = ComplexityLevel.COMPLEX
-        complexity_reason = "Long or multi-part query"
-    # Default intent
-    if "how " in q and (" do " in q or " to " in q):
-        intent = IntentCategory.HOW_TO
-    elif " vs " in q or " compare " in q:
-        intent = IntentCategory.COMPARISON
-    elif time_sensitive:
-        intent = IntentCategory.RECENT_EVENTS
-    else:
-        intent = IntentCategory.FACTUAL
-
-    return QueryAnalysisResult(
-        intent=intent,
-        intent_confidence=0.7,
-        entities=[],  # No entity extraction in fallback
-        time_sensitive=time_sensitive,
-        time_sensitivity_reason="Keyword-based detection" if time_sensitive else "No recency cues",
-        complexity=complexity,
-        complexity_reason=complexity_reason,
-    )
-
