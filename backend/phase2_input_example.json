@@ -1,0 +1,27 @@
+{
+  "original_query": "How does the Federal Reserve control inflation?",
+  "intent": "explanatory",
+  "entities": [
+    { "name": "Federal Reserve", "type": "organization" },
+    { "name": "inflation", "type": "economic_concept" }
+  ],
+  "time_sensitivity": {
+    "is_time_sensitive": false,
+    "date_range": null
+  },
+  "subqueries": [
+    "What tools does the Federal Reserve use to control inflation?",
+    "How do interest rates affect inflation?",
+    "What is quantitative tightening?"
+  ],
+  "search_variants": [
+    "tools does the Federal Reserve use to control inflation?",
+    "interest rates affect inflation?",
+    "quantitative tightening?"
+  ],
+  "constraints": {
+    "source_types": ["news", "academic", "government"],
+    "max_results_per_query": 10,
+    "language": "en"
+  }
+}

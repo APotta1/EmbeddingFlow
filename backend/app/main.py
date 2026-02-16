@@ -6,7 +6,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.phases.phase1 import analyze_query, run_phase1
-from app.phases.phase1.schemas import Phase1Output, QueryAnalysisResponse
+from app.phases.phase1.pipeline import to_phase2_payload
+from app.phases.phase1.schemas import Phase2Payload, QueryAnalysisResponse
 
 app = FastAPI(title="EmbeddingFlow", version="0.1.0")
 
@@ -31,14 +32,15 @@ def query_analyze(body: QueryRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@app.post("/api/v1/query/process", response_model=Phase1Output)
+@app.post("/api/v1/query/process", response_model=Phase2Payload)
 def query_process(body: QueryRequest):
     """
-    Phase 1 full pipeline: 1.1 Query Analysis → 1.2 Decomposition → 1.3 Expansion.
+    Phase 1 full pipeline: 1.1 → 1.2 → 1.3, then return JSON in Phase 2 format.
 
-    Returns combined output (query_analysis, query_decomposition, query_expansion) for Phase 2.
+    Returns: original_query, intent, entities, time_sensitivity, subqueries, search_variants, constraints.
     """
     try:
-        return run_phase1(body.query)
+        phase1 = run_phase1(body.query)
+        return to_phase2_payload(body.query, phase1)
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))

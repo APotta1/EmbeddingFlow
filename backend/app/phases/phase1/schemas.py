@@ -86,6 +86,46 @@ class Phase1Output(BaseModel):
     query_expansion: QueryExpansionOutput
 
 
+# ----- Phase 2 payload (JSON format sent to Phase 2) -----
+
+
+class Phase2Entity(BaseModel):
+    """Entity in Phase 2 format (name + type)."""
+
+    name: str = Field(..., description="Entity name/surface form")
+    type: str = Field(..., description="Entity type: organization, person, topic, etc.")
+
+
+class TimeSensitivityPayload(BaseModel):
+    """Time-sensitivity in Phase 2 format."""
+
+    is_time_sensitive: bool = False
+    date_range: list[str] | None = Field(default=None, description="Time expressions or null if not time-sensitive")
+
+
+class ConstraintsPayload(BaseModel):
+    """Search constraints for Phase 2."""
+
+    source_types: list[str] = Field(default_factory=lambda: ["news", "web", "academic"])
+    max_results_per_query: int = Field(default=10, ge=1, le=50)
+    language: str = Field(default="en")
+
+
+class Phase2Payload(BaseModel):
+    """
+    JSON format sent to Phase 2 (Web Search & Retrieval).
+    Matches the agreed contract between Phase 1 and Phase 2.
+    """
+
+    original_query: str = Field(..., description="User's original query")
+    intent: str = Field(..., description="Primary intent: factual, explanatory, comparison, etc.")
+    entities: list[Phase2Entity] = Field(default_factory=list)
+    time_sensitivity: TimeSensitivityPayload = Field(default_factory=TimeSensitivityPayload)
+    subqueries: list[str] = Field(..., min_length=1, description="Prioritized sub-questions")
+    search_variants: list[str] = Field(..., min_length=1, description="Search query variations")
+    constraints: ConstraintsPayload = Field(default_factory=ConstraintsPayload)
+
+
 # ----- Legacy / single-task responses -----
 
 
