@@ -8,13 +8,15 @@ Phase 1, Task 1.2: Query Decomposition.
 from .llm_utils import get_client, get_model, parse_llm_response
 from .schemas import QueryAnalysisOutput, QueryDecompositionOutput
 
-DECOMPOSITION_SYSTEM = """You are a query decomposer. Given a user search query and its analysis (complexity, intent), break it into sub-questions when needed.
+DECOMPOSITION_SYSTEM = """You are a query decomposer for a search pipeline. Given a user query and its intent/complexity, produce a set of sub-questions that encapsulate the topic and help the user conceptually understand what they are asking.
 
 Rules:
-- If the query is simple (single clear question), return a list with one element: the original query or a slight rewording.
-- If the query is moderate or complex, break it into 2-5 focused sub-questions that together cover the user's need.
-- Order sub-questions by priority: most important / foundational first, then follow-ups.
-- Each sub-question must be self-contained and answerable by a search.
+- Return exactly the requested number of sub-questions (see user message). Count by complexity: simple → 3, moderate → 4, complex → 5. Keep each sub-question dense and on-topic; avoid stretching narrow topics with filler.
+- ORDER BY THE USER'S MAIN ASK FIRST:
+  - For how_to queries: put sub-questions that directly address steps, methods, or "how to do it" first (e.g. "What are the main solution techniques?", "What are the typical steps?"). Then add background (definition, types) if needed.
+  - For factual / comparison / other: keep most foundational first (e.g. definition, then types, then examples).
+- Stay focused on understanding and doing the topic. Avoid meta questions like "where to find resources" or "what tools exist" unless the query explicitly asks for learning resources, tools, or recommendations. Prefer concrete angles: main techniques, typical steps, key concepts, examples.
+- Every sub-question must be self-contained and answerable by a web search. No duplicates or near-duplicates.
 - Return only valid JSON: { "sub_questions": ["question 1", "question 2", ...] }. No markdown or explanation."""
 
 DECOMPOSITION_USER_TEMPLATE = """Query: {query}
@@ -24,23 +26,25 @@ Analysis:
 - Complexity: {complexity_level} (suggested sub-questions: {suggested})
 - Multi-hop: {multi_hop}
 
-Return JSON with key "sub_questions" (array of strings, in priority order)."""
+Return JSON with key "sub_questions": exactly {target_count} strings, in priority order (user's main ask first; for how_to put steps/methods before background). Focus on understanding and doing; avoid meta "resources/tools" unless the query asks for them."""
+
+
+def _subquery_count_for_complexity(level: str) -> int:
+    """Return 3, 4, or 5 sub-queries based on complexity (simple → 3, moderate → 4, complex → 5)."""
+    return {"simple": 3, "moderate": 4, "complex": 5}.get(level.lower(), 4)
 
 
 def decompose_query(query: str, query_analysis: QueryAnalysisOutput) -> QueryDecompositionOutput:
     """
-    Run Task 1.2: break query into prioritized sub-questions.
-
-    For simple queries, returns a single-item list (the query itself or a rewording).
+    Run Task 1.2: break query into 3–5 prioritized sub-questions (by complexity) that encapsulate
+    the topic, put the user's main ask first, and avoid meta "resources/tools" unless requested.
     """
     query = (query or "").strip()
     if not query:
         return QueryDecompositionOutput(sub_questions=[""])
 
     comp = query_analysis.complexity
-    if comp.level == "simple" and comp.suggested_sub_questions == 0:
-        return QueryDecompositionOutput(sub_questions=[query])
-
+    target_count = _subquery_count_for_complexity(comp.level)
     client = get_client()
     user_content = DECOMPOSITION_USER_TEMPLATE.format(
         query=query,
@@ -48,6 +52,7 @@ def decompose_query(query: str, query_analysis: QueryAnalysisOutput) -> QueryDec
         complexity_level=comp.level,
         suggested=comp.suggested_sub_questions,
         multi_hop=comp.multi_hop,
+        target_count=target_count,
     )
     response = client.chat.completions.create(
         model=get_model(),
@@ -65,4 +70,8 @@ def decompose_query(query: str, query_analysis: QueryAnalysisOutput) -> QueryDec
     sub_questions = [str(q).strip() for q in sub_questions if str(q).strip()]
     if not sub_questions:
         sub_questions = [query]
+    # Enforce target count: take first N, pad with original query if fewer
+    sub_questions = sub_questions[:target_count]
+    while len(sub_questions) < target_count:
+        sub_questions.append(query)
     return QueryDecompositionOutput(sub_questions=sub_questions)

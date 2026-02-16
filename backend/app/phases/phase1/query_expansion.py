@@ -9,11 +9,11 @@ Phase 1, Task 1.3: Query Expansion.
 from .llm_utils import get_client, get_model, parse_llm_response
 from .schemas import QueryAnalysisOutput, QueryExpansionOutput
 
-EXPANSION_SYSTEM = """You are a search query expander. Given a user query and its analysis, produce variations and related terms for multi-source web search.
+EXPANSION_SYSTEM = """You are a search query expander for a multi-source web search pipeline. Produce diverse, non-redundant variations and related terms to maximize recall.
 
 Return only valid JSON with these keys:
-1. search_variations: array of 3-5 different phrasings of the query (different word choices, question vs keyword form, broader/narrower). Each variation should be a full search query string.
-2. synonyms_and_related: array of synonyms or related terms (short phrases or words) that could improve recall. Can be empty.
+1. search_variations: array of 5-7 distinct search query phrasings. Mix: question form vs keyword form, formal vs casual, broader vs more specific, technical terms vs plain language. Avoid near-duplicates (e.g. not both "Define X" and "X definition"). Each string is a full search query.
+2. synonyms_and_related: array of 5-10 terms that help recall: synonyms, related concepts, sub-topics, and key phrases a user might search. Be concrete (e.g. "machine learning", "neural networks") not vague.
 3. temporal_constraints: array of time-related search constraints ONLY if the query is time-sensitive (e.g. "2024", "recent", "last 12 months"). If not time-sensitive, use [].
 
 No markdown or explanation. Valid JSON only."""
@@ -26,7 +26,7 @@ Analysis:
 - Time expressions in query: {time_expressions}
 - Entities: {entity_texts}
 
-Generate search_variations (3-5), synonyms_and_related, and temporal_constraints (only if time-sensitive)."""
+Generate search_variations (5-7 distinct phrasings), synonyms_and_related (5-10 concrete terms), and temporal_constraints (only if time-sensitive)."""
 
 
 def expand_query(query: str, query_analysis: QueryAnalysisOutput) -> QueryExpansionOutput:
@@ -61,7 +61,7 @@ def expand_query(query: str, query_analysis: QueryAnalysisOutput) -> QueryExpans
             {"role": "system", "content": EXPANSION_SYSTEM},
             {"role": "user", "content": user_content},
         ],
-        temperature=0.3,
+        temperature=0.4,
     )
     content = response.choices[0].message.content
     raw = parse_llm_response(content)

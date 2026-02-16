@@ -7,12 +7,7 @@ Phase 1, Task 1.1: Query Analysis.
 - Complexity assessment (how difficult the query is)
 """
 
-import json
-import os
-from typing import Any
-
-from openai import OpenAI
-
+from .llm_utils import get_client, get_model, parse_llm_response
 from .schemas import (
     ComplexityOutput,
     EntityOutput,
@@ -44,26 +39,6 @@ Return only valid JSON with keys: intent, entities, time_sensitive, time_express
 QUERY_ANALYSIS_USER_TEMPLATE = "Analyze this search query:\n\n{query}"
 
 
-def _get_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is required for query analysis")
-    return OpenAI(api_key=api_key)
-
-
-def _parse_llm_response(content: str) -> dict[str, Any]:
-    """Parse JSON from LLM response, stripping markdown code blocks if present."""
-    text = content.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    return json.loads(text)
-
-
 def analyze_query(query: str) -> QueryAnalysisResponse:
     """
     Run Task 1.1 Query Analysis on the given query string.
@@ -81,9 +56,9 @@ def analyze_query(query: str) -> QueryAnalysisResponse:
             )
         )
 
-    client = _get_client()
+    client = get_client()
     response = client.chat.completions.create(
-        model=os.environ.get("OPENAI_QUERY_ANALYSIS_MODEL", "gpt-4o-mini"),
+        model=get_model(),
         messages=[
             {"role": "system", "content": QUERY_ANALYSIS_SYSTEM},
             {"role": "user", "content": QUERY_ANALYSIS_USER_TEMPLATE.format(query=query.strip())},
@@ -91,7 +66,7 @@ def analyze_query(query: str) -> QueryAnalysisResponse:
         temperature=0.1,
     )
     content = response.choices[0].message.content
-    raw = _parse_llm_response(content)
+    raw = parse_llm_response(content)
 
     # Map raw dict to Pydantic models
     intent_raw = raw.get("intent") or {}

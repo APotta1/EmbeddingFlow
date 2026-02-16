@@ -1,17 +1,17 @@
-"""Shared LLM helpers for Phase 1 (OpenAI client, JSON parsing)."""
+"""Shared LLM helpers for Phase 1 (Groq SDK, JSON parsing)."""
 
 import json
 import os
 from typing import Any
 
-from openai import OpenAI
+from groq import Groq
 
 
-def get_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY")
+def get_client() -> Groq:
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is required")
-    return OpenAI(api_key=api_key)
+        raise ValueError("GROQ_API_KEY environment variable is required")
+    return Groq(api_key=api_key)
 
 
 def parse_llm_response(content: str) -> dict[str, Any]:
@@ -28,4 +28,4 @@ def parse_llm_response(content: str) -> dict[str, Any]:
 
 
 def get_model() -> str:
-    return os.environ.get("OPENAI_QUERY_ANALYSIS_MODEL", "gpt-4o-mini")
+    return os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
