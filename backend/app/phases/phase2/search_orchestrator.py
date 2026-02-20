@@ -2,6 +2,9 @@
 Search orchestrator: parallel search across both APIs and all optimized queries.
 """
 
+#parrallel search across both APIs and all optimized queries
+#sequential search is being used to search the web for information one at a time
+
 import concurrent.futures
 import re
 from collections import defaultdict
