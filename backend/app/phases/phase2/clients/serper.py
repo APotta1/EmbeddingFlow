@@ -4,7 +4,11 @@ Serper Search API client. Uses SERP_API_KEY. Reuses a single requests.Session fo
 
 import os
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse 
+
+#uses json to parse the response from the API
+#searching the web for information
+#similar to tavily but uses a different API key
 
 import requests
 

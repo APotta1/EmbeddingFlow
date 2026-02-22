@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from app.phases.phase1.schemas import Phase2Payload
 
+#stripping webspace making to lowercaase
+#all pass queries are being normailzed to list/dictionary
+#diversity score is being calculated to see how different the query is from the ones we already have
 
 def normalize_query(query: str) -> str:
     return query.lower().strip()

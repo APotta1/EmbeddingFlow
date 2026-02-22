@@ -3,7 +3,7 @@ Search orchestrator: parallel search across both APIs and all optimized queries.
 """
 
 #parrallel search across both APIs and all optimized queries
-#sequential search is being used to search the web for information one at a time
+#sequential search is being used to search the web for information one by one
 
 import concurrent.futures
 import re
