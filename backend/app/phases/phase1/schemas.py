@@ -106,7 +106,7 @@ class TimeSensitivityPayload(BaseModel):
 class ConstraintsPayload(BaseModel):
     """Search constraints for Phase 2."""
 
-    source_types: list[str] = Field(default_factory=lambda: ["news", "web", "academic"])
+    source_types: list[str] = Field(default_factory=lambda: ["web", "academic"])
     max_results_per_query: int = Field(default=10, ge=1, le=50)
     language: str = Field(default="en")
 

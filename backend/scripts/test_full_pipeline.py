@@ -119,6 +119,7 @@ def main() -> None:
         top_n=20,
         time_sensitive=payload.time_sensitivity.is_time_sensitive,
         original_query=payload.original_query,
+        min_results_per_source=2,
     )
     print(f"After ranking: {len(ranked)} URLs (top_n=20)")
     print(f"Time sensitive used for recency: {payload.time_sensitivity.is_time_sensitive}")

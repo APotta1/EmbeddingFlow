@@ -55,7 +55,7 @@ def search_tavily(
             if payload.intent in ["explanatory", "comparison", "how_to", "factual"]
             else "basic"
         )
-        topic = "news" if (payload.intent == "news" or "news" in payload.constraints.source_types) else "general"
+        topic = "general"
         search_params = {
             "query": query,
             "search_depth": search_depth,

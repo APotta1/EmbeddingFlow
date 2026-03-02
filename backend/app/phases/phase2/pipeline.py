@@ -16,7 +16,7 @@ def run_phase2(
     payload: Phase2Payload,
     top_n: int = 20,
     *,
-    min_results_per_source: int = 0,
+    min_results_per_source: int = 2,
 ) -> Phase2Output:
     """
     Run full Phase 2: optimize queries → parallel search (both APIs) →
