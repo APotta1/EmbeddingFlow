@@ -34,14 +34,17 @@ def run_phase3(
             config=config,
         )
 
+    # If there is no running loop, use asyncio.run (simple CLI / script case).
     try:
-        loop = asyncio.get_event_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    if loop.is_running():
-        # In case we are inside an async context (e.g. FastAPI), create a task
-        # and run it via asyncio.run_until_complete on a new loop.
         return asyncio.run(_run())
-    return loop.run_until_complete(_run())
+
+    # If we're already inside an event loop (e.g. FastAPI, Jupyter), create and
+    # use a dedicated new loop for this blocking call.
+    new_loop = asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(_run())
+    finally:
+        new_loop.close()
 

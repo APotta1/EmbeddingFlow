@@ -1,5 +1,8 @@
 """
-Test full pipeline: Phase 1 (analyze → decompose → expand) → Phase 2 (search → rank).
+Test full pipeline:
+- Phase 1: analyze → decompose → expand
+- Phase 2: search → rank
+- Phase 3: fetch → extract → clean
 
 Run from backend with:
   python scripts/test_full_pipeline.py
@@ -7,7 +10,7 @@ Run from backend with:
 
 Requires: GROQ_API_KEY, TAV_API_KEY, SERP_API_KEY in env (or .env).
 Prints nitty-gritty: Phase 1 output, optimized queries, search results by source,
-then ranked top N with domain/source for tuning.
+then ranked top N with domain/source, and finally Phase 3 extraction stats/doc summaries.
 """
 
 import os
@@ -28,7 +31,9 @@ if _backend_root not in sys.path:
 from app.phases.phase1.pipeline import run_phase1, to_phase2_payload
 from app.phases.phase2.query_optimizer import optimize_queries
 from app.phases.phase2.ranking import rank_and_select
+from app.phases.phase2.schemas import Phase2Output
 from app.phases.phase2.search_orchestrator import search_parallel
+from app.phases.phase3.pipeline import run_phase3
 
 
 def _trunc(s: str, max_len: int = 72) -> str:
@@ -135,9 +140,39 @@ def main() -> None:
     for r in ranked:
         print(f"  {r.url}")
 
+    _section("PHASE 3: Content extraction & cleaning")
+    phase2_for_phase3 = Phase2Output(
+        original_query=payload.original_query,
+        urls=ranked,
+        total_searched=search_output.total_searched,
+        queries_used=search_output.queries_used,
+    )
+    phase3 = run_phase3(phase2_for_phase3)
+
+    _sub("Phase 3 stats")
+    stats = phase3.stats
+    print(f"  total_input_urls: {stats.total_input_urls}")
+    print(f"  fetched: {stats.fetched}")
+    print(f"  successful: {stats.successful}")
+    print(f"  skipped_robots: {stats.skipped_robots}")
+    print(f"  failed: {stats.failed}")
+    print(f"  below_quality_threshold: {stats.below_quality_threshold}")
+
+    _sub("Extracted documents (summary)")
+    print(f"{'#':>3}  {'domain':<28}  {'source':<8}  {'words':>6}  title")
+    print("-" * 80)
+    for i, doc in enumerate(phase3.documents, 1):
+        dom = (doc.domain or "")[:26] if doc.domain else "(no domain)"
+        src = (doc.source_api or "")[:6] if doc.source_api else ""
+        word_count = len(doc.content.split())
+        print(f"{i:>3}  {dom:<28}  {src:<8}  {word_count:>6}  {_trunc(doc.title or '', 32)}")
+
     _section("DONE")
     print(f"Query: {query}")
-    print(f"Phase 1 → Phase 2 payload → {len(search_output.urls)} merged → {len(ranked)} ranked")
+    print(
+        f"Phase 1 → Phase 2 payload → {len(search_output.urls)} merged → "
+        f"{len(ranked)} ranked → {len(phase3.documents)} extracted"
+    )
     print()
 
 

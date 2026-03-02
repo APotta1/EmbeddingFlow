@@ -29,6 +29,7 @@ from app.phases.phase3.schemas import ExtractedDocument, Phase3Output, Phase3Sta
 class Phase3Config:
     max_concurrent_requests: int = 8
     request_timeout_seconds: float = 15.0
+    robots_timeout_seconds: float = 5.0
     max_retries: int = 3
     backoff_base_seconds: float = 0.5
     min_word_count: int = 200
@@ -39,28 +40,40 @@ _robots_cache: dict[str, robotparser.RobotFileParser] = {}
 _robots_lock = asyncio.Lock()
 
 
-async def _get_robots_parser(domain: str, scheme: str = "https") -> robotparser.RobotFileParser:
+async def _get_robots_parser(
+    domain: str,
+    scheme: str = "https",
+    *,
+    timeout: float = 5.0,
+) -> robotparser.RobotFileParser:
     key = f"{scheme}://{domain}"
     async with _robots_lock:
         if key in _robots_cache:
             return _robots_cache[key]
+
         rp = robotparser.RobotFileParser()
         robots_url = f"{scheme}://{domain}/robots.txt"
         try:
-            rp.set_url(robots_url)
-            rp.read()
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                resp = await client.get(robots_url, timeout=timeout)
+            if resp.status_code < 400 and resp.text:
+                rp.parse(resp.text.splitlines())
+            else:
+                # If robots.txt cannot be read or is missing, default to allowing
+                rp.allow_all = True  # type: ignore[attr-defined]
         except Exception:
-            # If robots.txt cannot be read, default to allowing
+            # Network errors or timeouts: default to allowing
             rp.allow_all = True  # type: ignore[attr-defined]
+
         _robots_cache[key] = rp
         return rp
 
 
-async def _respect_robots(url: str, user_agent: str) -> bool:
+async def _respect_robots(url: str, user_agent: str, *, timeout: float) -> bool:
     parsed = urlparse(url)
     if not parsed.netloc:
         return True
-    rp = await _get_robots_parser(parsed.netloc, parsed.scheme or "https")
+    rp = await _get_robots_parser(parsed.netloc, parsed.scheme or "https", timeout=timeout)
     try:
         return rp.can_fetch(user_agent, url)
     except Exception:
@@ -74,11 +87,17 @@ def _is_pdf(url: str, content_type: Optional[str]) -> bool:
 
 
 def _normalize_whitespace(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    # Preserve paragraph boundaries (double newlines) while collapsing internal whitespace.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Collapse spaces and tabs but keep newlines
+    text = re.sub(r"[^\S\n]+", " ", text)
+    # Normalize runs of 3+ newlines down to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _split_paragraphs(text: str) -> list[str]:
-    # Simple paragraph split on double newlines or periods with line breaks
+    # Simple paragraph split on double newlines; single newlines stay within a paragraph.
     paragraphs = re.split(r"\n{2,}", text)
     cleaned = [p.strip() for p in paragraphs if p.strip()]
     return cleaned
@@ -137,7 +156,9 @@ def _extract_from_pdf(content: bytes, url: str, search_result: SearchResult) -> 
             position=search_result.position,
             content=normalized,
             content_paragraphs=paragraphs,
-            raw_metadata={"pdf_metadata": {k: str(v) for k, v in dict(meta).items()} if meta else {}},
+            raw_metadata={
+                "pdf_metadata": {k: str(v) for k, v in dict(meta).items()} if meta else {}
+            },
         )
     except Exception:
         return None
@@ -165,7 +186,18 @@ def _extract_from_html(html: str, url: str, search_result: SearchResult) -> Opti
         title = data.get("title")
         author = data.get("author")
         date = data.get("date") or data.get("date_publish")
-        raw_meta = data
+        # Keep metadata but avoid unbounded growth by shallow-copying and stringifying values.
+        raw_meta = {}
+        total_chars = 0
+        for k, v in list(data.items())[:64]:
+            key = str(k)
+            val = str(v)
+            if len(val) > 5000:
+                val = val[:5000]
+            if total_chars + len(key) + len(val) > 50000:
+                break
+            raw_meta[key] = val
+            total_chars += len(key) + len(val)
 
     if not text:
         # Fallback: plain text extraction
@@ -237,53 +269,59 @@ async def extract_documents_from_urls(
     below_threshold = 0
     fetched = 0
 
-    async def worker(sr: SearchResult):
+    async def worker(sr: SearchResult, client: httpx.AsyncClient):
         nonlocal skipped_robots, failed, below_threshold, fetched
 
         async with semaphore:
-            allowed = await _respect_robots(sr.url, cfg.user_agent)
+            allowed = await _respect_robots(
+                sr.url,
+                cfg.user_agent,
+                timeout=cfg.robots_timeout_seconds,
+            )
             if not allowed:
                 skipped_robots += 1
                 return
+            resp = await _fetch_with_retries(client, sr.url, cfg)
+            if resp is None or resp.content is None:
+                failed += 1
+                return
 
-            async with httpx.AsyncClient(headers={"User-Agent": cfg.user_agent}, follow_redirects=True) as client:
-                resp = await _fetch_with_retries(client, sr.url, cfg)
-                if resp is None or resp.content is None:
-                    failed += 1
-                    return
+            fetched += 1
+            content_type = resp.headers.get("Content-Type", "")
+            doc: Optional[ExtractedDocument]
+            if _is_pdf(sr.url, content_type):
+                doc = _extract_from_pdf(resp.content, sr.url, sr)
+            else:
+                try:
+                    html_text = resp.text
+                except UnicodeDecodeError:
+                    html_text = resp.content.decode("utf-8", errors="ignore")
+                doc = _extract_from_html(html_text, sr.url, sr)
 
-                fetched += 1
-                content_type = resp.headers.get("Content-Type", "")
-                doc: Optional[ExtractedDocument]
-                if _is_pdf(sr.url, content_type):
-                    doc = _extract_from_pdf(resp.content, sr.url, sr)
-                else:
-                    try:
-                        html_text = resp.text
-                    except UnicodeDecodeError:
-                        html_text = resp.content.decode("utf-8", errors="ignore")
-                    doc = _extract_from_html(html_text, sr.url, sr)
+            if not doc:
+                failed += 1
+                return
 
-                if not doc:
-                    failed += 1
-                    return
+            # Quality filter
+            word_count = len(doc.content.split())
+            if word_count < cfg.min_word_count:
+                below_threshold += 1
+                return
 
-                # Quality filter
-                word_count = len(doc.content.split())
-                if word_count < cfg.min_word_count:
-                    below_threshold += 1
-                    return
+            # Deduplicate by content hash
+            h = _hash_content(doc.content)
+            if h in seen_hashes:
+                return
+            seen_hashes.add(h)
+            documents.append(doc)
 
-                # Deduplicate by content hash
-                h = _hash_content(doc.content)
-                if h in seen_hashes:
-                    return
-                seen_hashes.add(h)
-                documents.append(doc)
-
-    tasks = [worker(sr) for sr in search_results]
-    # Run tasks with backpressure
-    await asyncio.gather(*tasks)
+    async with httpx.AsyncClient(
+        headers={"User-Agent": cfg.user_agent},
+        follow_redirects=True,
+    ) as client:
+        tasks = [worker(sr, client) for sr in search_results]
+        # Run tasks with backpressure
+        await asyncio.gather(*tasks)
 
     stats = Phase3Stats(
         total_input_urls=len(search_results),
