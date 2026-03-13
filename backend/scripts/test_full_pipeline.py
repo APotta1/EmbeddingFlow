@@ -3,6 +3,7 @@ Test full pipeline:
 - Phase 1: analyze → decompose → expand
 - Phase 2: search → rank
 - Phase 3: fetch → extract → clean
+- Phase 4: chunk → contextualize
 
 Run from backend with:
   python scripts/test_full_pipeline.py
@@ -10,7 +11,8 @@ Run from backend with:
 
 Requires: GROQ_API_KEY, TAV_API_KEY, SERP_API_KEY in env (or .env).
 Prints nitty-gritty: Phase 1 output, optimized queries, search results by source,
-then ranked top N with domain/source, and finally Phase 3 extraction stats/doc summaries.
+then ranked top N with domain/source, Phase 3 extraction stats/doc summaries,
+and Phase 4 chunking/contextualization summaries.
 """
 
 import os
@@ -34,6 +36,8 @@ from app.phases.phase2.ranking import rank_and_select
 from app.phases.phase2.schemas import Phase2Output
 from app.phases.phase2.search_orchestrator import search_parallel
 from app.phases.phase3.pipeline import run_phase3
+from app.phases.phase4.pipeline import run_phase4  # type: ignore[import-not-found]
+from app.phases.phase4.schemas import Phase4Config  # type: ignore[import-not-found]
 
 
 def _trunc(s: str, max_len: int = 72) -> str:
@@ -155,6 +159,7 @@ def main() -> None:
     print(f"  fetched: {stats.fetched}")
     print(f"  successful: {stats.successful}")
     print(f"  skipped_robots: {stats.skipped_robots}")
+    print(f"  skipped_nontext: {stats.skipped_nontext}")
     print(f"  failed: {stats.failed}")
     print(f"  below_quality_threshold: {stats.below_quality_threshold}")
 
@@ -167,11 +172,36 @@ def main() -> None:
         word_count = len(doc.content.split())
         print(f"{i:>3}  {dom:<28}  {src:<8}  {word_count:>6}  {_trunc(doc.title or '', 32)}")
 
+    _section("PHASE 4: Contextual chunking")
+    # Use default Phase4Config; adjust here if you want to experiment.
+    phase4_config = Phase4Config()
+    phase4 = run_phase4(phase3, config=phase4_config)
+
+    _sub("Phase 4 stats")
+    cstats = phase4.stats
+    print(f"  total_documents: {cstats.total_documents}")
+    print(f"  total_chunks: {cstats.total_chunks}")
+    print(f"  contextualized_chunks: {cstats.contextualized_chunks}")
+    print(f"  failed_contextualizations: {cstats.failed_contextualizations}")
+
+    _sub("Sample chunks (raw vs contextualized)")
+    sample_chunks = phase4.chunks[:5]
+    for i, ch in enumerate(sample_chunks, 1):
+        print(f"\nChunk {i} (doc_index={ch.document_index}, chunk_index={ch.chunk_index})")
+        print(f"  URL: {ch.url}")
+        print(f"  approx_token_count: {ch.approx_token_count}")
+        print("  Raw text:")
+        print(f"    {_trunc(ch.raw_text, 160)}")
+        if ch.contextualized_text != ch.raw_text:
+            print("  Contextualized text:")
+            print(f"    {_trunc(ch.contextualized_text, 200)}")
+
     _section("DONE")
     print(f"Query: {query}")
     print(
         f"Phase 1 → Phase 2 payload → {len(search_output.urls)} merged → "
-        f"{len(ranked)} ranked → {len(phase3.documents)} extracted"
+        f"{len(ranked)} ranked → {len(phase3.documents)} extracted → "
+        f"{len(phase4.chunks)} chunks"
     )
     print()
 

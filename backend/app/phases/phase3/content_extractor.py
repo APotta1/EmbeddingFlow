@@ -34,6 +34,7 @@ class Phase3Config:
     backoff_base_seconds: float = 0.5
     min_word_count: int = 200
     user_agent: str = "EmbeddingFlowBot/0.1 (+https://github.com/APotta1/EmbeddingFlow)"
+    enable_browser_fallback: bool = False
 
 
 _robots_cache: dict[str, robotparser.RobotFileParser] = {}
@@ -84,6 +85,43 @@ def _is_pdf(url: str, content_type: Optional[str]) -> bool:
     if content_type and "pdf" in content_type.lower():
         return True
     return url.lower().endswith(".pdf")
+
+
+def _is_nontext_content_type(content_type: str) -> bool:
+    ct = (content_type or "").lower()
+    if not ct:
+        return False
+    if ct.startswith("video/") or ct.startswith("audio/") or ct.startswith("image/"):
+        return True
+    return False
+
+
+async def _fetch_with_playwright(url: str, user_agent: str, timeout_seconds: float) -> Optional[str]:
+    """
+    Optional JS-rendered fetch using Playwright.
+
+    Only used if Phase3Config.enable_browser_fallback=True and Playwright is installed.
+    Returns rendered page HTML, or None on failure.
+    """
+
+    try:
+        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    timeout_ms = int(max(1.0, timeout_seconds) * 1000)
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            try:
+                page = await browser.new_page(user_agent=user_agent)
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                html = await page.content()
+                return html
+            finally:
+                await browser.close()
+    except Exception:
+        return None
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -255,6 +293,7 @@ async def extract_documents_from_urls(
                 fetched=0,
                 successful=0,
                 skipped_robots=0,
+                skipped_nontext=0,
                 failed=0,
                 below_quality_threshold=0,
             ),
@@ -268,9 +307,10 @@ async def extract_documents_from_urls(
     failed = 0
     below_threshold = 0
     fetched = 0
+    skipped_nontext = 0
 
     async def worker(sr: SearchResult, client: httpx.AsyncClient):
-        nonlocal skipped_robots, failed, below_threshold, fetched
+        nonlocal skipped_robots, failed, below_threshold, fetched, skipped_nontext
 
         async with semaphore:
             allowed = await _respect_robots(
@@ -288,6 +328,9 @@ async def extract_documents_from_urls(
 
             fetched += 1
             content_type = resp.headers.get("Content-Type", "")
+            if _is_nontext_content_type(content_type):
+                skipped_nontext += 1
+                return
             doc: Optional[ExtractedDocument]
             if _is_pdf(sr.url, content_type):
                 doc = _extract_from_pdf(resp.content, sr.url, sr)
@@ -297,6 +340,16 @@ async def extract_documents_from_urls(
                 except UnicodeDecodeError:
                     html_text = resp.content.decode("utf-8", errors="ignore")
                 doc = _extract_from_html(html_text, sr.url, sr)
+
+                # Optional fallback for JS-heavy pages: if extraction failed, try a browser render.
+                if not doc and cfg.enable_browser_fallback:
+                    rendered = await _fetch_with_playwright(
+                        sr.url,
+                        user_agent=cfg.user_agent,
+                        timeout_seconds=cfg.request_timeout_seconds,
+                    )
+                    if rendered:
+                        doc = _extract_from_html(rendered, sr.url, sr)
 
             if not doc:
                 failed += 1
@@ -328,6 +381,7 @@ async def extract_documents_from_urls(
         fetched=fetched,
         successful=len(documents),
         skipped_robots=skipped_robots,
+        skipped_nontext=skipped_nontext,
         failed=failed,
         below_quality_threshold=below_threshold,
     )

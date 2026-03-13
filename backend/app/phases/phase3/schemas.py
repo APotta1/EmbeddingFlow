@@ -43,6 +43,7 @@ class Phase3Stats(BaseModel):
     fetched: int
     successful: int
     skipped_robots: int
+    skipped_nontext: int
     failed: int
     below_quality_threshold: int
 

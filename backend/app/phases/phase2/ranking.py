@@ -185,6 +185,55 @@ def _basic_checks(result: SearchResult) -> bool:
     return True
 
 
+_NON_TEXT_EXTENSIONS = (
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".zip",
+)
+
+
+def _is_probably_nontext_url(url: str) -> bool:
+    """
+    Heuristic filter for URLs that are unlikely to yield useful text extraction.
+
+    This is intentionally general: it uses URL structure and file extensions
+    rather than a hardcoded allow/deny domain list.
+    """
+
+    if not url or not url.strip():
+        return True
+    u = url.strip().lower()
+    # Obvious non-text assets
+    if any(u.endswith(ext) for ext in _NON_TEXT_EXTENSIONS):
+        return True
+    # Common video / social URL shapes
+    if "/video/" in u or "/videos/" in u:
+        return True
+    if "watch?v=" in u or "/watch/" in u:
+        return True
+    if "/reel/" in u or "/shorts/" in u:
+        return True
+    # Social post routes are rarely clean article text
+    if "/posts/" in u or "/status/" in u:
+        return True
+    return False
+
+
+def _filter_probably_nontext(results: list[SearchResult]) -> list[SearchResult]:
+    """Drop URLs that are very unlikely to be text-extractable."""
+    return [r for r in results if not _is_probably_nontext_url(r.url)]
+
+
 def _filter_by_llm_relevance(results: list[SearchResult], original_query: str) -> list[SearchResult]:
     """
     Use Groq to keep only results that are relevant to the query. Batches results to stay under context.
@@ -302,6 +351,8 @@ def rank_and_select(
 
     # Only HTTPS links
     filtered = [r for r in results if _basic_checks(r)]
+    # Drop obvious non-text URLs early (videos, social posts, binary assets)
+    filtered = _filter_probably_nontext(filtered)
     if not filtered:
         return []
 
