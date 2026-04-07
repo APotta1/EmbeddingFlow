@@ -3,7 +3,8 @@ Test full pipeline:
 - Phase 1: analyze → decompose → expand
 - Phase 2: search → rank
 - Phase 3: fetch → extract → clean
-- Phase 4: chunk → contextualize
+ - Phase 4: chunk → contextualize
+ - Phase 5: embed → index
 
 Run from backend with:
   python scripts/test_full_pipeline.py
@@ -12,7 +13,7 @@ Run from backend with:
 Requires: GROQ_API_KEY, TAV_API_KEY, SERP_API_KEY in env (or .env).
 Prints nitty-gritty: Phase 1 output, optimized queries, search results by source,
 then ranked top N with domain/source, Phase 3 extraction stats/doc summaries,
-and Phase 4 chunking/contextualization summaries.
+and Phase 4 chunking/contextualization summaries, then Phase 5 indexing stats.
 """
 
 import os
@@ -38,6 +39,8 @@ from app.phases.phase2.search_orchestrator import search_parallel
 from app.phases.phase3.pipeline import run_phase3
 from app.phases.phase4.pipeline import run_phase4  # type: ignore[import-not-found]
 from app.phases.phase4.schemas import Phase4Config  # type: ignore[import-not-found]
+from app.phases.phase5.pipeline import run_phase5  # type: ignore[import-not-found]
+from app.phases.phase5.schemas import Phase5Config  # type: ignore[import-not-found]
 
 
 def _trunc(s: str, max_len: int = 72) -> str:
@@ -61,7 +64,11 @@ def main() -> None:
         query = "How does the Federal Reserve control inflation?"
 
     # Env check
-    missing = [k for k in ("GROQ_API_KEY", "TAV_API_KEY", "SERP_API_KEY") if not os.environ.get(k)]
+    missing = [
+        k
+        for k in ("GROQ_API_KEY", "TAV_API_KEY", "SERP_API_KEY", "OPENAI_API_KEY")
+        if not os.environ.get(k)
+    ]
     if missing:
         print("Missing env vars (set or use .env):", ", ".join(missing))
         sys.exit(1)
@@ -196,12 +203,35 @@ def main() -> None:
             print("  Contextualized text:")
             print(f"    {_trunc(ch.contextualized_text, 200)}")
 
+    _section("PHASE 5: Embedding & indexing")
+    # Defaults: OpenAI text-embedding-3-large + FAISS local index.
+    phase5_config = Phase5Config(
+        embedding_provider="openai",
+        embedding_model="text-embedding-3-large",
+        vector_store="faiss",
+        collection_name="embeddingflow_demo",
+        batch_size=32,
+    )
+    phase5 = run_phase5(phase4, config=phase5_config)
+
+    _sub("Phase 5 stats")
+    estats = phase5.stats
+    print(f"  provider: {estats.provider}")
+    print(f"  model: {estats.model}")
+    print(f"  vector_store: {estats.vector_store}")
+    print(f"  total_chunks_in: {estats.total_chunks_in}")
+    print(f"  embedded_chunks: {estats.embedded_chunks}")
+    print(f"  stored_vectors: {estats.stored_vectors}")
+    print(f"  failed_embeddings: {estats.failed_embeddings}")
+    print(f"  embedding_dimensions: {estats.embedding_dimensions}")
+    print(f"  store_response keys: {list(phase5.store_response.keys())}")
+
     _section("DONE")
     print(f"Query: {query}")
     print(
         f"Phase 1 → Phase 2 payload → {len(search_output.urls)} merged → "
         f"{len(ranked)} ranked → {len(phase3.documents)} extracted → "
-        f"{len(phase4.chunks)} chunks"
+        f"{len(phase4.chunks)} chunks → {phase5.stats.stored_vectors} indexed"
     )
     print()
 
