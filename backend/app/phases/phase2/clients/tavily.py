@@ -15,6 +15,21 @@ from app.phases.phase2.support import get_performance_monitor, get_rate_limiter,
 # Reuse client for performance (avoids repeated client setup)
 _tavily_client: Optional[TavilyClient] = None
 
+# Tavily API rejects queries longer than this (HyDE passages often exceed it).
+TAVILY_MAX_QUERY_CHARS = 400
+
+
+def _truncate_query_for_tavily(query: str, max_chars: int = TAVILY_MAX_QUERY_CHARS) -> str:
+    """Shorten query to Tavily's limit, preferring a word boundary."""
+    q = (query or "").strip()
+    if len(q) <= max_chars:
+        return q
+    truncated = q[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars // 2:
+        truncated = truncated[:last_space]
+    return truncated.rstrip() or q[:max_chars]
+
 
 def _get_client() -> TavilyClient:
     global _tavily_client
@@ -36,10 +51,11 @@ def search_tavily(
     cache = get_search_cache()
     monitor = get_performance_monitor()
     rate_limiter = get_rate_limiter(api_name)
-    metric = monitor.start_search(query, api_name)
+    query_api = _truncate_query_for_tavily(query)
+    metric = monitor.start_search(query_api, api_name)
 
     if use_cache:
-        cached = cache.get(query, api_name)
+        cached = cache.get(query_api, api_name)
         if cached:
             monitor.record_success(metric, len(cached), cache_hit=True)
             return cached
@@ -57,7 +73,7 @@ def search_tavily(
         )
         topic = "general"
         search_params = {
-            "query": query,
+            "query": query_api,
             "search_depth": search_depth,
             "topic": topic,
             "max_results": min(max_results, 20),
@@ -90,12 +106,18 @@ def search_tavily(
         rate_limiter.record_success(api_name)
         monitor.record_success(metric, len(results), cache_hit=False)
         if use_cache and results:
-            cache.set(query, api_name, results)
+            cache.set(
+                query_api,
+                api_name,
+                results,
+                time_sensitive=payload.time_sensitivity.is_time_sensitive,
+            )
         return results
 
     except Exception as e:
         is_rate_limit = "429" in str(e) or "rate limit" in str(e).lower()
         rate_limiter.record_error(api_name, is_rate_limit_error=is_rate_limit)
         monitor.record_error(metric, str(e))
-        print(f"Tavily search error for query '{query}': {e}")
+        shown = query_api if len(query_api) < 120 else query_api[:117] + "…"
+        print(f"Tavily search error for query '{shown}': {e}")
         return []

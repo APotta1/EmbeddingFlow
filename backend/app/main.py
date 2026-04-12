@@ -40,7 +40,7 @@ def list_phases():
     Useful for phase selection/dropdown UIs.
     """
     return [
-        PhaseInfo(id=1, name="Query Processing", description="Analyze, decompose, expand query."),
+        PhaseInfo(id=1, name="Query Processing", description="Parallel analysis + HyDE/retrieval plan."),
         PhaseInfo(id=2, name="Web Search & Retrieval", description="Search, dedupe, and rank URLs."),
         PhaseInfo(id=3, name="Content Extraction & Cleaning", description="Fetch and clean document text."),
         PhaseInfo(id=4, name="Contextual Chunking", description="Chunk documents and enrich chunk context."),
@@ -75,9 +75,10 @@ def phase5_run(body: Phase5Request):
 @app.post("/api/v1/query/process", response_model=Phase2Payload)
 def query_process(body: QueryRequest):
     """
-    Phase 1 full pipeline: 1.1 → 1.2 → 1.3, then return JSON in Phase 2 format.
+    Phase 1 full pipeline: parallel query analysis + HyDE/keyword/sub-question plan, then Phase 2 JSON.
 
-    Returns: original_query, intent, entities, time_sensitivity, subqueries, search_variants, constraints.
+    Returns: original_query, intent, entities, time_sensitivity, subqueries, search_variants,
+    hyde_document, tavily_queries, serper_queries, constraints.
     """
     try:
         phase1 = run_phase1(body.query)

@@ -40,11 +40,11 @@ class QueryAnalysisOutput(BaseModel):
     complexity: ComplexityOutput
 
 
-# ----- Task 1.2: Query Decomposition -----
+# ----- Task 1.2 / 1.3 (legacy shapes; kept for imports/tests that reference types) -----
 
 
 class QueryDecompositionOutput(BaseModel):
-    """Prioritized sub-questions from Task 1.2."""
+    """Prioritized sub-questions (legacy). Prefer QueryRetrievalPlanOutput."""
 
     sub_questions: list[str] = Field(
         ...,
@@ -53,11 +53,8 @@ class QueryDecompositionOutput(BaseModel):
     )
 
 
-# ----- Task 1.3: Query Expansion -----
-
-
 class QueryExpansionOutput(BaseModel):
-    """Search variations and related terms from Task 1.3."""
+    """Search variations (legacy). Prefer QueryRetrievalPlanOutput."""
 
     search_variations: list[str] = Field(
         ...,
@@ -75,15 +72,41 @@ class QueryExpansionOutput(BaseModel):
     )
 
 
+# ----- HyDE + expansion + decomposition (single LLM call) -----
+
+
+class QueryRetrievalPlanOutput(BaseModel):
+    """
+    One-call retrieval plan: HyDE hypothetical passage, keyword variants for breadth,
+    optional multi-hop sub-questions, plus auxiliary recall terms.
+    """
+
+    hyde_document: str = Field(
+        default="",
+        description="Hypothetical document/answer passage (HyDE); semantic anchor for Tavily and embeddings",
+    )
+    keyword_variants: list[str] = Field(
+        default_factory=list,
+        description="Short keyword-style queries for Serper (breadth / freshness)",
+    )
+    sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Multi-hop sub-queries (complex only); each self-contained for search",
+    )
+    temporal_constraints: list[str] = Field(
+        default_factory=list,
+        description="Time-related filters if the query is time-sensitive",
+    )
+
+
 # ----- Phase 1 full output (for Phase 2) -----
 
 
 class Phase1Output(BaseModel):
-    """Complete Phase 1 output: analysis + decomposition + expansion. Sent to Phase 2."""
+    """Complete Phase 1 output: analysis + unified HyDE / expansion / decomposition plan."""
 
     query_analysis: QueryAnalysisOutput
-    query_decomposition: QueryDecompositionOutput
-    query_expansion: QueryExpansionOutput
+    query_retrieval_plan: QueryRetrievalPlanOutput
 
 
 # ----- Phase 2 payload (JSON format sent to Phase 2) -----
@@ -121,8 +144,23 @@ class Phase2Payload(BaseModel):
     intent: str = Field(..., description="Primary intent: factual, explanatory, comparison, etc.")
     entities: list[Phase2Entity] = Field(default_factory=list)
     time_sensitivity: TimeSensitivityPayload = Field(default_factory=TimeSensitivityPayload)
-    subqueries: list[str] = Field(..., min_length=1, description="Prioritized sub-questions")
+    subqueries: list[str] = Field(
+        default_factory=list,
+        description="Prioritized sub-questions (multi-hop); empty when none (simple/moderate)",
+    )
     search_variants: list[str] = Field(..., min_length=1, description="Search query variations")
+    hyde_document: str = Field(
+        default="",
+        description="HyDE hypothetical passage; prefer for semantic embedding over raw question text",
+    )
+    tavily_queries: list[str] = Field(
+        default_factory=list,
+        description="Queries routed to Tavily (semantic / deep). Empty falls back to legacy optimizer path.",
+    )
+    serper_queries: list[str] = Field(
+        default_factory=list,
+        description="Queries routed to Serper (keyword / breadth). Empty skips Serper when tavily_queries is set.",
+    )
     constraints: ConstraintsPayload = Field(default_factory=ConstraintsPayload)
 
 

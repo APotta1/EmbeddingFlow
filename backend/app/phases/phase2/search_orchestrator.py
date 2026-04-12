@@ -72,22 +72,22 @@ def _merge_results(
     for url, candidates in url_to_results.items():
         if not candidates:
             continue
-        # Prefer longer snippet, then Serper, then lower position; then boost by query relevance
+        # Prefer longer snippet, then Tavily (typically higher-signal for merged factual retrieval)
         best = max(
             candidates,
             key=lambda r: (
                 len(r.snippet or ""),
-                1 if r.source_api == "serper" else 0,
+                1 if r.source_api == "tavily" else 0,
                 -r.position,
             ),
         )
         merged.append(best)
 
-    # Sort by relevance (accuracy), then API, then position
+    # Sort by relevance (accuracy), then prefer Tavily, then position
     merged.sort(
         key=lambda r: (
             -_relevance_score(r, original_query),
-            0 if r.source_api == "serper" else 1,
+            0 if r.source_api == "tavily" else 1,
             r.position,
         )
     )
@@ -152,28 +152,58 @@ def search_parallel(
     max_workers: Optional[int] = None,
     max_results_per_query: Optional[int] = None,
 ) -> Phase2Output:
-    """Run parallel search across both APIs and all optimized queries."""
-    optimized = optimize_queries(payload)
-    queries = optimized.queries
-
-    if not queries:
-        return Phase2Output(
-            original_query=payload.original_query,
-            urls=[],
-            total_searched=0,
-            queries_used=[],
-        )
-
-    tasks = []
+    """Run parallel search across Tavily and Serper using engine-specific queries when set."""
     max_results = max_results_per_query or payload.constraints.max_results_per_query
-    for query in queries:
-        for api_name in SEARCH_APIS:
-            tasks.append(
-                SearchTask(query=query, api_name=api_name, payload=payload, max_results=max_results)
-            )
 
-    max_workers = max_workers if max_workers is not None else min(10, len(tasks))
-    all_results = []
+    tavily_queries = [q.strip() for q in (payload.tavily_queries or []) if q and q.strip()]
+    serper_queries = [q.strip() for q in (payload.serper_queries or []) if q and q.strip()]
+
+    if tavily_queries or serper_queries:
+        tasks: list[SearchTask] = []
+        for query in tavily_queries:
+            tasks.append(
+                SearchTask(
+                    query=query,
+                    api_name="tavily",
+                    payload=payload,
+                    max_results=max_results,
+                )
+            )
+        for query in serper_queries:
+            tasks.append(
+                SearchTask(
+                    query=query,
+                    api_name="serper",
+                    payload=payload,
+                    max_results=max_results,
+                )
+            )
+        queries_used = list(dict.fromkeys(tavily_queries + serper_queries))
+    else:
+        optimized = optimize_queries(payload)
+        queries = optimized.queries
+        if not queries:
+            return Phase2Output(
+                original_query=payload.original_query,
+                urls=[],
+                total_searched=0,
+                queries_used=[],
+            )
+        tasks = []
+        for query in queries:
+            for api_name in SEARCH_APIS:
+                tasks.append(
+                    SearchTask(
+                        query=query,
+                        api_name=api_name,
+                        payload=payload,
+                        max_results=max_results,
+                    )
+                )
+        queries_used = queries
+
+    max_workers = max_workers if max_workers is not None else min(10, max(1, len(tasks)))
+    all_results: list[list[SearchResult]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {executor.submit(_execute_search_task, task): task for task in tasks}
         for future in concurrent.futures.as_completed(future_to_task):
@@ -186,13 +216,10 @@ def search_parallel(
 
     merged = _merge_results(all_results, payload.original_query)
     final_results = _deduplicate_results(merged)
-    max_total_results = max_results * len(queries)
-    if len(final_results) > max_total_results:
-        final_results = final_results[:max_total_results]
 
     return Phase2Output(
         original_query=payload.original_query,
         urls=final_results,
         total_searched=len(tasks),
-        queries_used=queries,
+        queries_used=queries_used,
     )

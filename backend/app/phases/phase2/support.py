@@ -15,6 +15,12 @@ from typing import Optional
 from app.phases.phase2.query_optimizer import normalize_query
 from app.phases.phase2.schemas import SearchResult
 
+
+def get_ttl(time_sensitive: bool) -> int:
+    """Cache lifetime: short for time-sensitive queries, longer otherwise."""
+    return 300 if time_sensitive else 3600
+
+
 # ----- Rate limiter -----
 
 
@@ -123,12 +129,11 @@ class CachedSearchResult:
 
 
 class SearchCache:
-    def __init__(self, cache_dir: Optional[str] = None, ttl_seconds: int = 3600):
+    def __init__(self, cache_dir: Optional[str] = None):
         if cache_dir is None:
             cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "cache")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.ttl_seconds = ttl_seconds
         self._memory_cache: dict[str, CachedSearchResult] = {}
 
     def _get_cache_key(self, query: str, api_name: str) -> str:
@@ -180,16 +185,17 @@ class SearchCache:
             return [SearchResult(**r) for r in cached.results]
         return None
 
-    def set(self, query: str, api_name: str, results: list[SearchResult]):
+    def set(self, query: str, api_name: str, results: list[SearchResult], *, time_sensitive: bool = False):
         cache_key = self._get_cache_key(query, api_name)
         current_time = time.time()
+        ttl = get_ttl(time_sensitive)
         cached = CachedSearchResult(
             query=query,
             normalized_query=normalize_query(query),
             results=[r.model_dump() for r in results],
             timestamp=current_time,
             source_api=api_name,
-            expires_at=current_time + self.ttl_seconds,
+            expires_at=current_time + ttl,
         )
         self._memory_cache[cache_key] = cached
         self._save_to_file(cache_key, cached)

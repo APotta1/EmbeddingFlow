@@ -14,9 +14,11 @@ def get_client() -> Groq:
     return Groq(api_key=api_key)
 
 
-def parse_llm_response(content: str) -> dict[str, Any]:
+def parse_llm_response(content: str | None) -> dict[str, Any]:
     """Parse JSON from LLM response, stripping markdown code blocks if present."""
-    text = content.strip()
+    if content is None or not str(content).strip():
+        return {}
+    text = str(content).strip()
     if text.startswith("```"):
         lines = text.split("\n")
         if lines[0].startswith("```"):
@@ -24,7 +26,10 @@ def parse_llm_response(content: str) -> dict[str, Any]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
 
 
 def get_model() -> str:

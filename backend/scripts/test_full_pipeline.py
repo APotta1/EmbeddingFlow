@@ -1,24 +1,25 @@
 """
-Test full pipeline:
-- Phase 1: analyze → decompose → expand
+Test pipeline phases 1–4 (Phase 5 embedding/indexing is not run here).
+
+- Phase 1: parallel analyze + HyDE/retrieval plan → Phase 2 payload
 - Phase 2: search → rank
 - Phase 3: fetch → extract → clean
- - Phase 4: chunk → contextualize
- - Phase 5: embed → index
+- Phase 4: chunk → contextualize
 
 Run from backend with:
   python scripts/test_full_pipeline.py
   python scripts/test_full_pipeline.py "Your search query here"
 
 Requires: GROQ_API_KEY, TAV_API_KEY, SERP_API_KEY in env (or .env).
-Prints nitty-gritty: Phase 1 output, optimized queries, search results by source,
-then ranked top N with domain/source, Phase 3 extraction stats/doc summaries,
-and Phase 4 chunking/contextualization summaries, then Phase 5 indexing stats.
+Prints Phase 1 output, optimized queries, search results, ranked URLs,
+Phase 3 extraction stats, and Phase 4 chunking/contextualization summaries.
 """
 
 import os
 import sys
+from collections import Counter
 from textwrap import shorten
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -32,6 +33,7 @@ if _backend_root not in sys.path:
     sys.path.insert(0, _backend_root)
 
 from app.phases.phase1.pipeline import run_phase1, to_phase2_payload
+from app.phases.phase2 import ranking as ranking_mod
 from app.phases.phase2.query_optimizer import optimize_queries
 from app.phases.phase2.ranking import rank_and_select
 from app.phases.phase2.schemas import Phase2Output
@@ -39,8 +41,6 @@ from app.phases.phase2.search_orchestrator import search_parallel
 from app.phases.phase3.pipeline import run_phase3
 from app.phases.phase4.pipeline import run_phase4  # type: ignore[import-not-found]
 from app.phases.phase4.schemas import Phase4Config  # type: ignore[import-not-found]
-from app.phases.phase5.pipeline import run_phase5  # type: ignore[import-not-found]
-from app.phases.phase5.schemas import Phase5Config  # type: ignore[import-not-found]
 
 
 def _trunc(s: str, max_len: int = 72) -> str:
@@ -58,6 +58,15 @@ def _sub(title: str) -> None:
     print(f"\n--- {title} ---")
 
 
+def _result_domain(r) -> str:
+    if r.domain and str(r.domain).strip():
+        return str(r.domain).strip().lower()
+    try:
+        return urlparse(r.url or "").netloc.lower() or (r.url or "")
+    except Exception:
+        return (r.url or "").lower()
+
+
 def main() -> None:
     query = (sys.argv[1] if len(sys.argv) > 1 else "How does the Federal Reserve control inflation?").strip()
     if not query:
@@ -66,7 +75,7 @@ def main() -> None:
     # Env check
     missing = [
         k
-        for k in ("GROQ_API_KEY", "TAV_API_KEY", "SERP_API_KEY", "OPENAI_API_KEY")
+        for k in ("GROQ_API_KEY", "TAV_API_KEY", "SERP_API_KEY")
         if not os.environ.get(k)
     ]
     if missing:
@@ -85,21 +94,85 @@ def main() -> None:
     print(f"  Entities: {[e.text for e in phase1.query_analysis.entities]}")
     print(f"  Complexity: {phase1.query_analysis.complexity.level}")
 
-    _sub("Subqueries (decomposition)")
-    for i, sq in enumerate(phase1.query_decomposition.sub_questions, 1):
-        print(f"  {i}. {_trunc(sq, 70)}")
-
-    _sub("Search variants (expansion)")
-    for i, v in enumerate(phase1.query_expansion.search_variations, 1):
-        print(f"  {i}. {_trunc(v, 70)}")
+    _sub("HyDE + retrieval plan")
+    plan = phase1.query_retrieval_plan
+    print(f"  HyDE (truncated): {_trunc(plan.hyde_document, 120)}")
+    for i, k in enumerate(plan.keyword_variants, 1):
+        print(f"  Keyword {i}: {_trunc(k, 70)}")
+    for i, sq in enumerate(plan.sub_questions, 1):
+        print(f"  Sub-question {i}: {_trunc(sq, 70)}")
 
     _sub("Phase 2 payload (summary)")
     print(f"  original_query: {_trunc(payload.original_query)}")
     print(f"  intent: {payload.intent}")
     print(f"  subqueries count: {len(payload.subqueries)}")
     print(f"  search_variants count: {len(payload.search_variants)}")
+    print(f"  tavily_queries: {len(payload.tavily_queries)}  serper_queries: {len(payload.serper_queries)}")
     print(f"  time_sensitive: {payload.time_sensitivity.is_time_sensitive}")
     print(f"  max_results_per_query: {payload.constraints.max_results_per_query}")
+
+    _sub("Phase 1 validation")
+    level = phase1.query_analysis.complexity.level.lower().strip()
+    time_s = phase1.query_analysis.time_sensitive
+    oq_norm = payload.original_query.strip()
+
+    if level == "simple":
+        assert len(payload.subqueries) == 0, (
+            f"FAIL: simple query should have 0 subqueries, got {len(payload.subqueries)}"
+        )
+        n_ser = len(payload.serper_queries)
+        assert n_ser <= 1, f"FAIL: simple should have at most 1 Serper query, got {n_ser}"
+        assert len(payload.tavily_queries) >= 1, "FAIL: simple should have at least 1 Tavily query (HyDE)"
+        if time_s:
+            assert n_ser == 1, (
+                f"FAIL: simple+time_sensitive should send 1 Serper query for freshness, got {n_ser}"
+            )
+        else:
+            if plan.keyword_variants:
+                assert n_ser == 1, (
+                    f"FAIL: simple with keyword variants should send 1 Serper, got {n_ser}"
+                )
+            else:
+                assert n_ser == 0, (
+                    f"FAIL: simple without keyword variants should have 0 Serper, got {n_ser}"
+                )
+        print("  [PASS] simple: 0 subqueries, Tavily+Serper counts match policy")
+
+    elif level == "moderate":
+        assert len(payload.subqueries) == 0, (
+            f"FAIL: moderate should have 0 subqueries, got {len(payload.subqueries)}"
+        )
+        assert len(payload.tavily_queries) == 1, (
+            f"FAIL: moderate should have 1 Tavily query (HyDE), got {len(payload.tavily_queries)}"
+        )
+        assert len(payload.serper_queries) <= 3, (
+            f"FAIL: moderate should have <=3 Serper queries, got {len(payload.serper_queries)}"
+        )
+        print(
+            f"  [PASS] moderate: 0 subqueries, {len(payload.tavily_queries)} Tavily, "
+            f"{len(payload.serper_queries)} Serper"
+        )
+
+    elif level == "complex":
+        assert len(payload.subqueries) > 0, "FAIL: complex should have subqueries"
+        assert len(payload.subqueries) <= 4, (
+            f"FAIL: complex should have <=4 subqueries, got {len(payload.subqueries)}"
+        )
+        print(
+            f"  [PASS] complex: {len(payload.subqueries)} subqueries, "
+            f"{len(payload.tavily_queries)} Tavily, {len(payload.serper_queries)} Serper"
+        )
+
+    for sq in payload.subqueries:
+        assert sq.strip() != oq_norm, (
+            f"FAIL: original_query leaked into subqueries: {sq!r}"
+        )
+    print("  [PASS] no original_query padding in subqueries")
+
+    assert payload.hyde_document and len(payload.hyde_document) > 50, (
+        "FAIL: HyDE document too short or empty"
+    )
+    print(f"  [PASS] HyDE document present ({len(payload.hyde_document)} chars)")
 
     _section("PHASE 2: Query optimization")
     optimized = optimize_queries(payload)
@@ -107,7 +180,12 @@ def main() -> None:
     for i, q in enumerate(optimized.queries, 1):
         print(f"  {i}. {_trunc(q, 70)}")
     if optimized.duplicate_to_canonical:
-        print("Duplicate → canonical:", optimized.duplicate_to_canonical)
+        print(f"  ({len(optimized.duplicate_to_canonical)} exact duplicate(s) removed)")
+        for dup_norm, canonical in optimized.duplicate_to_canonical.items():
+            print(
+                f"    REMOVED norm: '{_trunc(dup_norm, 50)}' "
+                f"→ kept: '{_trunc(canonical, 50)}'"
+            )
 
     _section("PHASE 2: Search (Tavily + Serper, parallel)")
     search_output = search_parallel(payload)
@@ -150,6 +228,34 @@ def main() -> None:
     _sub("Final URLs (raw)")
     for r in ranked:
         print(f"  {r.url}")
+
+    _sub("Ranking validation")
+    domains_in_ranked = [_result_domain(r) for r in ranked]
+
+    blocked_found = [
+        d for d in domains_in_ranked if d and ranking_mod._domain_is_low_value_for_research(d)
+    ]
+    if blocked_found:
+        uniq = sorted(set(blocked_found))
+        print(f"  [FAIL] low-value / blocked-style domains in ranked results: {uniq[:12]}")
+    else:
+        print("  [PASS] no ranking blocklist domains in ranked results")
+
+    tavily_count = sum(1 for r in ranked if r.source_api == "tavily")
+    serper_count = sum(1 for r in ranked if r.source_api == "serper")
+    print(f"  source mix: tavily={tavily_count}, serper={serper_count}")
+    if serper_count == 0 and level != "simple":
+        print(f"  [WARN] Serper contributed 0 URLs to final ranking for {level} query")
+
+    top5_domains = domains_in_ranked[:5]
+    top5_counts = Counter(top5_domains)
+    warned_dom = False
+    for domain, count in top5_counts.items():
+        if count > 2:
+            print(f"  [WARN] {domain!r} appears {count} times in top 5")
+            warned_dom = True
+    if not warned_dom and top5_domains:
+        print("  [PASS] domain diversity ok in top 5 (no domain >2 of 5)")
 
     _section("PHASE 3: Content extraction & cleaning")
     phase2_for_phase3 = Phase2Output(
@@ -203,37 +309,6 @@ def main() -> None:
             print("  Contextualized text:")
             print(f"    {_trunc(ch.contextualized_text, 200)}")
 
-    _section("PHASE 5: Embedding & indexing")
-    # Defaults: OpenAI text-embedding-3-large + FAISS local index.
-    phase5_config = Phase5Config(
-        embedding_provider="openai",
-        embedding_model="text-embedding-3-large",
-        vector_store="faiss",
-        collection_name="embeddingflow_demo",
-        batch_size=32,
-    )
-    phase5 = run_phase5(phase4, config=phase5_config)
-
-    _sub("Phase 5 stats")
-    estats = phase5.stats
-    print(f"  provider: {estats.provider}")
-    print(f"  model: {estats.model}")
-    print(f"  vector_store: {estats.vector_store}")
-    print(f"  total_chunks_in: {estats.total_chunks_in}")
-    print(f"  embedded_chunks: {estats.embedded_chunks}")
-    print(f"  stored_vectors: {estats.stored_vectors}")
-    print(f"  failed_embeddings: {estats.failed_embeddings}")
-    print(f"  embedding_dimensions: {estats.embedding_dimensions}")
-    print(f"  store_response keys: {list(phase5.store_response.keys())}")
-
-    _section("DONE")
-    print(f"Query: {query}")
-    print(
-        f"Phase 1 → Phase 2 payload → {len(search_output.urls)} merged → "
-        f"{len(ranked)} ranked → {len(phase3.documents)} extracted → "
-        f"{len(phase4.chunks)} chunks → {phase5.stats.stored_vectors} indexed"
-    )
-    print()
 
 
 if __name__ == "__main__":

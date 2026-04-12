@@ -46,6 +46,55 @@ def _domain_from_result(result: SearchResult) -> str:
         return ""
 
 
+# Factual retrieval: drop mirrors and social / UGC platforms (weak citations, paywalls, noise).
+_LOW_VALUE_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    "archive.today",
+    "archive.ph",
+    "archive.is",
+    "archive.li",
+    "archive.md",
+    "archive.vn",
+    "archive.fo",
+    "archive.ec",
+    "archive.nu",
+    "archive.ninja",
+    "linkedin.com",
+    "lnkd.in",
+    "facebook.com",
+    "fb.com",
+    "instagram.com",
+    "reddit.com",
+    "redd.it",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+    "pinterest.com",
+    "snapchat.com",
+    "tumblr.com",
+    "threads.net",
+    "quora.com",
+    "youtube.com",
+    "youtu.be",
+)
+
+
+def _domain_is_low_value_for_research(domain: str) -> bool:
+    """True if host is (or is under) a domain we routinely exclude for factual research."""
+    d = (domain or "").strip().lower()
+    if not d:
+        return False
+    if d.startswith("www."):
+        d = d[4:]
+    for suf in _LOW_VALUE_DOMAIN_SUFFIXES:
+        if d == suf or d.endswith("." + suf):
+            return True
+    return False
+
+
+def _filter_low_value_domains(results: list[SearchResult]) -> list[SearchResult]:
+    return [r for r in results if not _domain_is_low_value_for_research(_domain_from_result(r))]
+
+
 def _get_domain_credibility_groq(domains: list[str]) -> dict[str, float]:
     """
     Call Groq to assess credibility of each domain. Returns map domain -> 0.0–1.0.
@@ -351,6 +400,8 @@ def rank_and_select(
 
     # Only HTTPS links
     filtered = [r for r in results if _basic_checks(r)]
+    # Drop archive mirrors and social / low-signal hosts for factual retrieval
+    filtered = _filter_low_value_domains(filtered)
     # Drop obvious non-text URLs early (videos, social posts, binary assets)
     filtered = _filter_probably_nontext(filtered)
     if not filtered:

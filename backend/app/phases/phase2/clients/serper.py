@@ -95,7 +95,12 @@ def search_serper(
         rate_limiter.record_success(api_name)
         monitor.record_success(metric, len(results), cache_hit=False)
         if use_cache and results:
-            cache.set(query, api_name, results)
+            cache.set(
+                query,
+                api_name,
+                results,
+                time_sensitive=payload.time_sensitivity.is_time_sensitive,
+            )
         return results
 
     except requests.exceptions.HTTPError as e:
