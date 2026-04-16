@@ -207,12 +207,23 @@ def main() -> None:
     for api, count in sorted(by_api.items()):
         print(f"  {api}: {count} URLs")
 
+    _sub("BM25 score distribution (from merge step)")
+    print("  (distribution printed inline above during _merge_results)")
+    print(f"  URLs surviving BM25 threshold: {len(search_output.urls)}")
+    if len(search_output.urls) == 0:
+        print("  [WARN] BM25 filtered everything — threshold may be too aggressive")
+    elif len(search_output.urls) < 5:
+        print(f"  [WARN] only {len(search_output.urls)} URLs survived BM25 — consider lowering threshold")
+    else:
+        print(f"  [PASS] {len(search_output.urls)} URLs passed BM25 threshold")
+
     _section("PHASE 2: Ranking (Groq credibility + position + recency)")
     ranked = rank_and_select(
         search_output.urls,
         top_n=20,
         time_sensitive=payload.time_sensitivity.is_time_sensitive,
         original_query=payload.original_query,
+        hyde_document=payload.hyde_document,
         min_results_per_source=5,
     )
     print(f"After ranking: {len(ranked)} URLs (top_n=20)")

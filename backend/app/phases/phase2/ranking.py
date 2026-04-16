@@ -5,9 +5,10 @@ from urllib.parse import urlparse
 
 from app.phases.phase1.llm_utils import get_client, get_model, parse_llm_response
 from app.phases.phase2.schemas import SearchResult
+from app.phases.phase2.support import get_domain_credibility_cache
 
 # Default: take top 20; caller can pass 15–20
-DEFAULT_TOP_N = 20
+FALLBACK_TOP_N = 20
 
 # Domains with Groq credibility below this (after 0–10 → 0–1) are filtered out
 CREDIBILITY_MIN = 0.2
@@ -75,6 +76,19 @@ _LOW_VALUE_DOMAIN_SUFFIXES: tuple[str, ...] = (
     "quora.com",
     "youtube.com",
     "youtu.be",
+    "istockphoto.com",
+    "shutterstock.com",
+    "gettyimages.com",
+    "alamy.com",
+    "depositphotos.com",
+    "brainly.com",
+    "brainly.in",
+    "brainly.co.id",
+    "chegg.com",
+    "coursehero.com",
+    "answers.com",
+    "ask.com",
+    "reference.com",
 )
 
 
@@ -108,7 +122,12 @@ def _get_domain_credibility_groq(domains: list[str]) -> dict[str, float]:
         return {}
     batch = unique[:GROQ_DOMAINS_BATCH]
 
-    user_content = "Rate credibility (0–10) for each of these domains:\n" + ", ".join(batch)
+    cache = get_domain_credibility_cache()
+    out, uncached = cache.partition_cached(batch)
+    if not uncached:
+        return out
+
+    user_content = "Rate credibility (0–10) for each of these domains:\n" + ", ".join(uncached)
 
     try:
         client = get_client()
@@ -124,9 +143,9 @@ def _get_domain_credibility_groq(domains: list[str]) -> dict[str, float]:
         raw = parse_llm_response(content or "{}")
     except Exception as e:
         print(f"Groq domain credibility error: {e}")
-        return {}
+        return out
 
-    out: dict[str, float] = {}
+    new_scores: dict[str, float] = {}
     for domain, value in (raw or {}).items():
         if not isinstance(domain, str):
             continue
@@ -138,7 +157,10 @@ def _get_domain_credibility_groq(domains: list[str]) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
         # Normalize 0–10 to 0–1
-        out[d] = max(0.0, min(1.0, score / 10.0))
+        new_scores[d] = max(0.0, min(1.0, score / 10.0))
+
+    cache.set_many(new_scores)
+    out.update(new_scores)
     return out
 
 
@@ -283,7 +305,11 @@ def _filter_probably_nontext(results: list[SearchResult]) -> list[SearchResult]:
     return [r for r in results if not _is_probably_nontext_url(r.url)]
 
 
-def _filter_by_llm_relevance(results: list[SearchResult], original_query: str) -> list[SearchResult]:
+def _filter_by_llm_relevance(
+    results: list[SearchResult],
+    original_query: str,
+    hyde_document: str = "",
+) -> list[SearchResult]:
     """
     Use Groq to keep only results that are relevant to the query. Batches results to stay under context.
     Returns the subset of results the LLM marked as relevant.
@@ -293,11 +319,20 @@ def _filter_by_llm_relevance(results: list[SearchResult], original_query: str) -
 
     out: list[SearchResult] = []
     snippet_max = 250  # chars per snippet to save tokens
+    hyde_context = (
+        f"\n\nIdeal answer context (use this to better judge relevance):\n{hyde_document[:600]}"
+        if hyde_document
+        else ""
+    )
 
     for start in range(0, len(results), RELEVANCE_LLM_BATCH):
         batch = results[start : start + RELEVANCE_LLM_BATCH]
         lines = [f"{i+1}. Title: {(r.title or '')[:120]}\n   Snippet: {(r.snippet or '')[:snippet_max]}" for i, r in enumerate(batch)]
-        user_content = f"User query: {original_query}\n\nSearch results:\n" + "\n\n".join(lines) + "\n\nReturn a JSON array of the 1-based indices that are relevant to the query (e.g. [1, 2, 5])."
+        user_content = (
+            f"User query: {original_query[:300]}{hyde_context}\n\nSearch results:\n"
+            + "\n\n".join(lines)
+            + "\n\nReturn a JSON array of the 1-based indices that are relevant to the query (e.g. [1, 2, 5])."
+        )
 
         try:
             client = get_client()
@@ -336,60 +371,37 @@ def _filter_by_llm_relevance(results: list[SearchResult], original_query: str) -
     return out
 
 
-def _score_relevance_to_query(result: SearchResult, original_query: str) -> float:
-    """Score 0–1 by how many query terms appear in title/snippet; title matches count more."""
-    if not original_query or not original_query.strip():
-        return 0.5
-    words = [w for w in re.findall(r"\w+", original_query.lower()) if len(w) > 1]
-    if not words:
-        return 0.5
-    title_lower = (result.title or "").lower()
-    snippet_lower = (result.snippet or "").lower()
-    score = 0.0
-    for w in words:
-        if w in title_lower:
-            score += 1.5
-        elif w in snippet_lower:
-            score += 1.0
-    return min(1.0, score / len(words))
-
-
-WEIGHT_POSITION = 0.30
-WEIGHT_DOMAIN = 0.35
-WEIGHT_RECENCY = 0.15
-WEIGHT_RELEVANCE = 0.20
-
-# Drop results with relevance to original query below this (removes off-topic hits from any API)
-MIN_RELEVANCE_TO_ORIGINAL_QUERY = 0.2
+WEIGHT_POSITION = 0.35
+WEIGHT_DOMAIN = 0.45
+WEIGHT_RECENCY = 0.20
 
 
 def rank_and_select(
     results: list[SearchResult],
-    top_n: int = DEFAULT_TOP_N,
+    top_n: int = FALLBACK_TOP_N,
     time_sensitive: bool = False,
     original_query: str = "",
+    hyde_document: str = "",
     *,
     weight_position: float = WEIGHT_POSITION,
     weight_domain: float = WEIGHT_DOMAIN,
     weight_recency: float = WEIGHT_RECENCY,
-    weight_relevance: float = WEIGHT_RELEVANCE,
     min_credibility: float = CREDIBILITY_MIN,
-    min_relevance: float = MIN_RELEVANCE_TO_ORIGINAL_QUERY,
     min_results_per_source: int = 0,
 ) -> list[SearchResult]:
     """
-    Score each URL (position, domain credibility, recency, relevance to query),
-    filter non-HTTPS, low-credibility, and off-topic; sort by combined score; return top N.
+    Score each URL (position, domain credibility, recency),
+    filter non-HTTPS and low-credibility; sort by combined score; return top N.
 
     Args:
         results: Merged, deduplicated SearchResult list from search.
         top_n: Number of results to return (default 20).
         time_sensitive: If True, recency scoring is applied.
-        original_query: User query; used for relevance-to-query scoring.
+        original_query: User query; used for LLM relevance filtering only.
+        hyde_document: Optional HyDE text; included in relevance prompt when non-empty.
         weight_position: Weight for position score.
         weight_domain: Weight for domain credibility score.
         weight_recency: Weight for recency score.
-        weight_relevance: Weight for relevance-to-query score.
         min_credibility: Domains with Groq credibility below this (0–1) are filtered out.
 
     Returns:
@@ -411,13 +423,7 @@ def rank_and_select(
 
     # LLM-based relevance filter: keep only results the model says are relevant to the query
     if query:
-        filtered = _filter_by_llm_relevance(filtered, query)
-    if not filtered:
-        return []
-
-    # Optional: also drop results with very low regex-based relevance score
-    if query and min_relevance > 0:
-        filtered = [r for r in filtered if _score_relevance_to_query(r, query) >= min_relevance]
+        filtered = _filter_by_llm_relevance(filtered, query, hyde_document=hyde_document)
     if not filtered:
         return []
 
@@ -428,21 +434,19 @@ def rank_and_select(
     if not filtered:
         return []
 
-    total_w = weight_position + weight_domain + weight_recency + weight_relevance
+    total_w = weight_position + weight_domain + weight_recency
     if total_w <= 0:
         total_w = 1.0
     wp = weight_position / total_w
     wd = weight_domain / total_w
     wr = weight_recency / total_w
-    wrel = weight_relevance / total_w
     max_pos = max(r.position for r in filtered)
 
     def combined_score(r: SearchResult) -> float:
         pos_s = _score_position(r, max_position=max_pos)
         dom_s = _score_domain_authority(r, credibility_map)
         rec_s = _score_recency(r, time_sensitive)
-        rel_s = _score_relevance_to_query(r, query)
-        return wp * pos_s + wd * dom_s + wr * rec_s + wrel * rel_s
+        return wp * pos_s + wd * dom_s + wr * rec_s
 
     filtered.sort(key=combined_score, reverse=True)
     top = filtered[:top_n]

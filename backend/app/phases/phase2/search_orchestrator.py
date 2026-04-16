@@ -6,18 +6,65 @@ Search orchestrator: parallel search across both APIs and all optimized queries.
 #sequential search is being used to search the web for information one by one
 
 import concurrent.futures
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
 from app.phases.phase1.schemas import Phase2Payload
+from app.phases.phase2.bm25 import bm25_score, filter_by_bm25, tokenize
 from app.phases.phase2.clients import search_serper, search_tavily
 from app.phases.phase2.query_optimizer import optimize_queries
 from app.phases.phase2.schemas import Phase2Output, SearchResult
 
 # Always use both APIs in parallel
 SEARCH_APIS = ["tavily", "serper"]
+BLOCKED_DOMAINS = {
+    "www.youtube.com",
+    "youtube.com",
+    "youtu.be",
+    "www.reddit.com",
+    "reddit.com",
+    "old.reddit.com",
+    "www.quora.com",
+    "quora.com",
+    "www.facebook.com",
+    "facebook.com",
+    "m.facebook.com",
+    "www.instagram.com",
+    "instagram.com",
+    "www.twitter.com",
+    "twitter.com",
+    "x.com",
+    "www.x.com",
+    "mobile.twitter.com",
+    "t.co",
+    "istockphoto.com",
+    "www.istockphoto.com",
+    "shutterstock.com",
+    "www.shutterstock.com",
+    "gettyimages.com",
+    "www.gettyimages.com",
+    "alamy.com",
+    "www.alamy.com",
+    "depositphotos.com",
+    "www.depositphotos.com",
+    "brainly.com",
+    "www.brainly.com",
+    "brainly.in",
+    "www.brainly.in",
+    "brainly.co.id",
+    "www.brainly.co.id",
+    "chegg.com",
+    "www.chegg.com",
+    "coursehero.com",
+    "www.coursehero.com",
+    "answers.com",
+    "www.answers.com",
+    "ask.com",
+    "www.ask.com",
+    "reference.com",
+    "www.reference.com",
+}
 
 
 @dataclass
@@ -28,20 +75,9 @@ class SearchTask:
     max_results: Optional[int] = None
 
 
-def _relevance_score(result: SearchResult, original_query: str) -> float:
-    """Score by query-term coverage; title matches count more than snippet (accuracy)."""
-    words = [w for w in re.findall(r"\w+", original_query.lower()) if len(w) > 1]
-    if not words:
-        return 0.0
-    title_lower = (result.title or "").lower()
-    snippet_lower = (result.snippet or "").lower()
-    score = 0.0
-    for w in words:
-        if w in title_lower:
-            score += 1.5  # title match = stronger signal
-        elif w in snippet_lower:
-            score += 1.0
-    return score / len(words)
+def _is_blocked(result: SearchResult) -> bool:
+    domain = (result.domain or "").lower().strip()
+    return domain in BLOCKED_DOMAINS
 
 
 def _deduplicate_results(results: list[SearchResult]) -> list[SearchResult]:
@@ -60,9 +96,12 @@ def _merge_results(
     all_results: list[list[SearchResult]],
     original_query: str,
 ) -> list[SearchResult]:
-    """Merge by URL, pick best result per URL, then sort by relevance and position."""
+    """Merge by URL, then rank/filter via BM25 and apply domain diversity."""
+    filtered_results = [
+        [result for result in results if not _is_blocked(result)] for results in all_results
+    ]
     url_to_results: dict[str, list[SearchResult]] = defaultdict(list)
-    for results in all_results:
+    for results in filtered_results:
         for result in results:
             url_lower = result.url.lower().strip()
             if url_lower:
@@ -83,20 +122,44 @@ def _merge_results(
         )
         merged.append(best)
 
-    # Sort by relevance (accuracy), then prefer Tavily, then position
+    n_docs = len(merged)
+    doc_freqs: dict[str, int] = defaultdict(int)
+    doc_lengths: dict[str, int] = {}
+    for result in merged:
+        doc_key = result.url.lower().strip()
+        tokens = tokenize(f"{result.title or ''} {result.snippet or ''}")
+        doc_lengths[doc_key] = len(tokens)
+        for term in set(tokens):
+            doc_freqs[term] += 1
+
+    bm25_scores: dict[str, float] = {}
+    for result in merged:
+        url_lower = result.url.lower().strip()
+        bm25_scores[url_lower] = bm25_score(
+            original_query,
+            result.title or "",
+            result.snippet or "",
+            result.url.lower().strip(),
+            doc_lengths,
+            doc_freqs,
+            n_docs,
+        )
+
     merged.sort(
         key=lambda r: (
-            -_relevance_score(r, original_query),
+            -bm25_scores.get(r.url.lower().strip(), 0.0),
             0 if r.source_api == "tavily" else 1,
             r.position,
         )
     )
 
-    # Domain diversity: avoid clustering same domain (improves result variety/accuracy)
-    merged = _apply_domain_diversity(merged)
+    merged = filter_by_bm25(merged, original_query)
 
     for idx, result in enumerate(merged, start=1):
         result.position = idx
+
+    # Domain diversity runs after BM25 filtering and positional reassignment.
+    merged = _apply_domain_diversity(merged)
     return merged
 
 

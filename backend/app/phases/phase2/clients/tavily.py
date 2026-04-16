@@ -78,6 +78,7 @@ def search_tavily(
             "topic": topic,
             "max_results": min(max_results, 20),
             "include_answer": True,  # encourages results that directly address the query
+            "timeout": 10,
         }
         if payload.time_sensitivity.is_time_sensitive:
             search_params["time_range"] = "month"

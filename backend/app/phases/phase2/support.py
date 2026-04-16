@@ -208,6 +208,129 @@ def get_search_cache() -> SearchCache:
     return _search_cache
 
 
+# ----- Domain credibility cache (Groq scores, disk + memory) -----
+
+CREDIBILITY_CACHE_TTL = 86400  # 24 hours
+
+
+@dataclass
+class CachedDomainCredibility:
+    domain: str
+    score: float
+    expires_at: float
+
+
+class DomainCredibilityCache:
+    """Memory-backed JSON cache for domain credibility scores (same directory as SearchCache)."""
+
+    def __init__(
+        self,
+        cache_dir: Optional[str] = None,
+        *,
+        default_ttl_seconds: int = CREDIBILITY_CACHE_TTL,
+    ):
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "cache")
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.default_ttl_seconds = default_ttl_seconds
+        self._memory: dict[str, tuple[float, float]] = {}  # normalized domain -> (score, expires_at)
+        self._lock = Lock()
+
+    @staticmethod
+    def _normalize_domain(domain: str) -> str:
+        return (domain or "").strip().lower()
+
+    def _cache_file(self, norm_domain: str) -> Path:
+        key_string = f"cred:{norm_domain}"
+        cache_key = hashlib.md5(key_string.encode()).hexdigest()
+        return self.cache_dir / f"domain_cred_{cache_key}.json"
+
+    def _load_from_file(self, norm_domain: str) -> Optional[CachedDomainCredibility]:
+        cache_file = self._cache_file(norm_domain)
+        if not cache_file.exists():
+            return None
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if time.time() > data.get("expires_at", 0):
+                cache_file.unlink(missing_ok=True)
+                return None
+            return CachedDomainCredibility(
+                domain=data.get("domain", norm_domain),
+                score=float(data["score"]),
+                expires_at=float(data["expires_at"]),
+            )
+        except Exception as e:
+            print(f"Error loading domain credibility cache {cache_file}: {e}")
+            return None
+
+    def _save_to_file(self, norm_domain: str, score: float, expires_at: float) -> None:
+        try:
+            rec = CachedDomainCredibility(domain=norm_domain, score=score, expires_at=expires_at)
+            with open(self._cache_file(norm_domain), "w", encoding="utf-8") as f:
+                json.dump(asdict(rec), f, indent=2)
+        except Exception as e:
+            print(f"Error saving domain credibility cache: {e}")
+
+    def _get_unlocked(self, norm_domain: str, now: float) -> Optional[float]:
+        if norm_domain in self._memory:
+            score, exp = self._memory[norm_domain]
+            if now < exp:
+                return score
+            del self._memory[norm_domain]
+        cached = self._load_from_file(norm_domain)
+        if cached and now < cached.expires_at:
+            self._memory[norm_domain] = (cached.score, cached.expires_at)
+            return cached.score
+        return None
+
+    def get(self, domain: str) -> Optional[float]:
+        norm = self._normalize_domain(domain)
+        if not norm:
+            return None
+        with self._lock:
+            return self._get_unlocked(norm, time.time())
+
+    def partition_cached(self, domains: list[str]) -> tuple[dict[str, float], list[str]]:
+        """Return scores for cache hits (keys = original domain strings) and list of uncached domains."""
+        now = time.time()
+        out: dict[str, float] = {}
+        uncached: list[str] = []
+        with self._lock:
+            for d in domains:
+                norm = self._normalize_domain(d)
+                if not norm:
+                    continue
+                hit = self._get_unlocked(norm, now)
+                if hit is not None:
+                    out[d] = hit
+                else:
+                    uncached.append(d)
+        return out, uncached
+
+    def set_many(self, scores: dict[str, float]) -> None:
+        """Store fresh Groq scores; expires_at = now + default_ttl_seconds."""
+        if not scores:
+            return
+        now = time.time()
+        expires_at = now + self.default_ttl_seconds
+        with self._lock:
+            for d, score in scores.items():
+                norm = self._normalize_domain(d)
+                if not norm:
+                    continue
+                self._memory[norm] = (score, expires_at)
+                self._save_to_file(norm, score, expires_at)
+
+
+_domain_credibility_cache = DomainCredibilityCache()
+
+
+def get_domain_credibility_cache() -> DomainCredibilityCache:
+    return _domain_credibility_cache
+
+
 # ----- Performance monitor -----
 
 

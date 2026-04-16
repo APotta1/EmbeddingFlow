@@ -7,9 +7,11 @@ from .ranking import rank_and_select
 from .schemas import Phase2Output, SearchResult
 from .search_orchestrator import search_parallel
 from .support import (
+    DomainCredibilityCache,
     PerformanceMonitor,
     RateLimiter,
     SearchCache,
+    get_domain_credibility_cache,
     get_performance_monitor,
     get_rate_limiter,
     get_search_cache,
@@ -27,7 +29,9 @@ __all__ = [
     "Phase2Output",
     "SearchResult",
     "SearchCache",
+    "DomainCredibilityCache",
     "get_search_cache",
+    "get_domain_credibility_cache",
     "PerformanceMonitor",
     "get_performance_monitor",
     "RateLimiter",
