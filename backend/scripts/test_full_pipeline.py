@@ -38,7 +38,8 @@ from app.phases.phase2.query_optimizer import optimize_queries
 from app.phases.phase2.ranking import rank_and_select
 from app.phases.phase2.schemas import Phase2Output
 from app.phases.phase2.search_orchestrator import search_parallel
-from app.phases.phase3.pipeline import run_phase3
+from app.phases.phase3.content_extractor import Phase3Config
+from app.phases.phase3.pipeline import run_phase3_sync
 from app.phases.phase4.pipeline import run_phase4  # type: ignore[import-not-found]
 from app.phases.phase4.schemas import Phase4Config  # type: ignore[import-not-found]
 
@@ -218,15 +219,19 @@ def main() -> None:
         print(f"  [PASS] {len(search_output.urls)} URLs passed BM25 threshold")
 
     _section("PHASE 2: Ranking (Groq credibility + position + recency)")
+    bm25_survivors = len(search_output.urls)
+    effective_top_n = min(bm25_survivors, 15)
+    print(f"  top_n dynamic: {bm25_survivors} BM25 survivors → fetching top {effective_top_n}")
+
     ranked = rank_and_select(
         search_output.urls,
-        top_n=20,
+        top_n=effective_top_n,
         time_sensitive=payload.time_sensitivity.is_time_sensitive,
         original_query=payload.original_query,
         hyde_document=payload.hyde_document,
-        min_results_per_source=5,
+        min_results_per_source=2,
     )
-    print(f"After ranking: {len(ranked)} URLs (top_n=20)")
+    print(f"After ranking: {len(ranked)} URLs (top_n={effective_top_n})")
     print(f"Time sensitive used for recency: {payload.time_sensitivity.is_time_sensitive}")
 
     _sub("Final ranked URLs (for Phase 3 extraction)")
@@ -252,19 +257,65 @@ def main() -> None:
     else:
         print("  [PASS] no ranking blocklist domains in ranked results")
 
+    PAYWALLED_DOMAINS = {
+        "www.sciencedirect.com",
+        "sciencedirect.com",
+        "www.jstor.org",
+        "jstor.org",
+        "link.springer.com",
+        "springer.com",
+        "onlinelibrary.wiley.com",
+        "wiley.com",
+        "www.nature.com",
+        "www.tandfonline.com",
+    }
+    paywalled_found = [d for d in domains_in_ranked if d in PAYWALLED_DOMAINS]
+    if paywalled_found:
+        print(f"  [WARN] paywalled domains in ranked results (will fail Phase 3): {sorted(set(paywalled_found))}")
+    else:
+        print("  [PASS] no known paywalled domains in ranked results")
+
     tavily_count = sum(1 for r in ranked if r.source_api == "tavily")
     serper_count = sum(1 for r in ranked if r.source_api == "serper")
     print(f"  source mix: tavily={tavily_count}, serper={serper_count}")
     if serper_count == 0 and level != "simple":
         print(f"  [WARN] Serper contributed 0 URLs to final ranking for {level} query")
 
+    ACADEMIC_AUTHORITY_DOMAINS = {
+        "pmc.ncbi.nlm.nih.gov",
+        "pubmed.ncbi.nlm.nih.gov",
+        "ncbi.nlm.nih.gov",
+        "arxiv.org",
+        "frontiersin.org",
+        "en.wikipedia.org",
+        "journals.plos.org",
+        "biorxiv.org",
+        "medrxiv.org",
+        "jamanetwork.com",
+        "bmj.com",
+        "thelancet.com",
+        "nejm.org",
+        "academic.oup.com",
+        "ieeexplore.ieee.org",
+        "dl.acm.org",
+        "semanticscholar.org",
+        "researchgate.net",
+        "pnas.org",
+        "science.org",
+        "cell.com",
+        "jneurosci.org",
+    }
+
     top5_domains = domains_in_ranked[:5]
     top5_counts = Counter(top5_domains)
     warned_dom = False
     for domain, count in top5_counts.items():
         if count > 2:
-            print(f"  [WARN] {domain!r} appears {count} times in top 5")
-            warned_dom = True
+            if domain in ACADEMIC_AUTHORITY_DOMAINS:
+                print(f"  [INFO] {domain!r} appears {count} times in top 5 (expected — high-authority academic source)")
+            else:
+                print(f"  [WARN] {domain!r} appears {count} times in top 5")
+                warned_dom = True
     if not warned_dom and top5_domains:
         print("  [PASS] domain diversity ok in top 5 (no domain >2 of 5)")
 
@@ -275,7 +326,13 @@ def main() -> None:
         total_searched=search_output.total_searched,
         queries_used=search_output.queries_used,
     )
-    phase3 = run_phase3(phase2_for_phase3)
+    phase3_config = Phase3Config(
+        unpaywall_email=os.environ.get("UNPAYWALL_EMAIL", ""),
+        crossref_email=os.environ.get("CROSSREF_EMAIL", ""),
+        core_api_key=os.environ.get("CORE_API_KEY", ""),
+        enable_browser_fallback=True,
+    )
+    phase3 = run_phase3_sync(phase2_for_phase3, config=phase3_config)
 
     _sub("Phase 3 stats")
     stats = phase3.stats
@@ -286,6 +343,39 @@ def main() -> None:
     print(f"  skipped_nontext: {stats.skipped_nontext}")
     print(f"  failed: {stats.failed}")
     print(f"  below_quality_threshold: {stats.below_quality_threshold}")
+    print(f"  fetched_via_api: {stats.fetched_via_api}")
+    print(f"  fetched_via_playwright: {stats.fetched_via_playwright}")
+
+    _sub("Failed URLs (Phase 3)")
+    successful_urls = {doc.url for doc in phase3.documents}
+    all_input_urls = [r.url for r in phase2_for_phase3.urls]
+
+    # URLs that were fetched but failed extraction or quality filter
+    truly_failed = [
+        url for url in all_input_urls
+        if url not in successful_urls
+    ]
+
+    # Split into genuine failures vs below quality threshold
+    # stats.below_quality_threshold tells us how many were quality-filtered
+    # so we can annotate accordingly
+    below_threshold_count = stats.below_quality_threshold
+    genuinely_failed = truly_failed[below_threshold_count:]
+    quality_filtered = truly_failed[:below_threshold_count]
+
+    if genuinely_failed:
+        print(f"  Extraction failures ({len(genuinely_failed)}):")
+        for url in genuinely_failed:
+            print(f"    [FAIL] {url}")
+    else:
+        print("  [PASS] no extraction failures")
+
+    if quality_filtered:
+        print(f"  Below quality threshold ({len(quality_filtered)}):")
+        for url in quality_filtered:
+            print(f"    [QUALITY] {url}")
+    else:
+        print("  [PASS] no documents below quality threshold")
 
     _sub("Extracted documents (summary)")
     print(f"{'#':>3}  {'domain':<28}  {'source':<8}  {'words':>6}  title")

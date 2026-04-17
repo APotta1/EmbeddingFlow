@@ -46,6 +46,8 @@ class Phase3Stats(BaseModel):
     skipped_nontext: int
     failed: int
     below_quality_threshold: int
+    fetched_via_api: int = 0
+    fetched_via_playwright: int = 0
 
 
 class Phase3Output(BaseModel):

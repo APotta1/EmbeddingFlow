@@ -16,35 +16,21 @@ from app.phases.phase3.content_extractor import (
 from app.phases.phase3.schemas import Phase3Output
 
 
-def run_phase3(
+async def run_phase3(
     phase2_output: Phase2Output,
     config: Optional[Phase3Config] = None,
 ) -> Phase3Output:
-    """
-    Run full Phase 3 synchronously: fetch → extract → clean.
+    """Async entry: fetch → extract → clean."""
+    return await extract_documents_from_urls(
+        phase2_output.urls,
+        original_query=phase2_output.original_query,
+        config=config,
+    )
 
-    This is a thin synchronous wrapper around the async extractor to make it easy
-    to call from FastAPI or scripts.
-    """
 
-    async def _run() -> Phase3Output:
-        return await extract_documents_from_urls(
-            phase2_output.urls,
-            original_query=phase2_output.original_query,
-            config=config,
-        )
-
-    # If there is no running loop, use asyncio.run (simple CLI / script case).
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_run())
-
-    # If we're already inside an event loop (e.g. FastAPI, Jupyter), create and
-    # use a dedicated new loop for this blocking call.
-    new_loop = asyncio.new_event_loop()
-    try:
-        return new_loop.run_until_complete(_run())
-    finally:
-        new_loop.close()
-
+def run_phase3_sync(
+    phase2_output: Phase2Output,
+    config: Optional[Phase3Config] = None,
+) -> Phase3Output:
+    """Sync wrapper for CLI scripts and testing. Do not call from async context."""
+    return asyncio.run(run_phase3(phase2_output, config))

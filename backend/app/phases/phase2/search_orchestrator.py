@@ -64,6 +64,16 @@ BLOCKED_DOMAINS = {
     "www.ask.com",
     "reference.com",
     "www.reference.com",
+    "sciencedirect.com",
+    "www.sciencedirect.com",
+    "jstor.org",
+    "www.jstor.org",
+    "link.springer.com",
+    "www.link.springer.com",
+    "onlinelibrary.wiley.com",
+    "www.onlinelibrary.wiley.com",
+    "altoida.com",
+    "www.altoida.com",
 }
 
 

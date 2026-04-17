@@ -89,6 +89,11 @@ _LOW_VALUE_DOMAIN_SUFFIXES: tuple[str, ...] = (
     "answers.com",
     "ask.com",
     "reference.com",
+    "sciencedirect.com",
+    "jstor.org",
+    "link.springer.com",
+    "onlinelibrary.wiley.com",
+    "altoida.com",
 )
 
 
@@ -429,6 +434,7 @@ def rank_and_select(
 
     domains = [_domain_from_result(r) for r in filtered]
     credibility_map = _get_domain_credibility_groq(domains)
+    pre_credibility_results = filtered.copy()
     filtered = _filter_by_credibility(filtered, credibility_map, min_credibility=min_credibility)
 
     if not filtered:
@@ -455,7 +461,7 @@ def rank_and_select(
     if min_results_per_source > 0 and len(top) == top_n:
         top_set = set(id(r) for r in top)
         by_source: dict[str, list[SearchResult]] = {}
-        for r in filtered:
+        for r in pre_credibility_results:
             key = (r.source_api or "serper").lower()
             by_source.setdefault(key, []).append(r)
         for source, results_from_source in by_source.items():
